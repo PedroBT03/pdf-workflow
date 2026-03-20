@@ -1,0 +1,8 @@
+torch
+tensorflow
+numpy
+opencv-python
+pdf2image
+transformers
+doclayout-yolo
+paddleocr
