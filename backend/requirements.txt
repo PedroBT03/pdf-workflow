@@ -3,3 +3,4 @@ uvicorn[standard]
 python-multipart
 PyMuPDF
 pdf2data-tools
+nltk

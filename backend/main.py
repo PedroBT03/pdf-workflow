@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import fitz
 
 app = FastAPI()
@@ -20,6 +21,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _normalize_block_type(block: dict) -> str:
+    raw = str(block.get("type") or "").strip().lower()
+    if raw in {"section_header", "paragraph"}:
+        return raw
+    if raw in {"title", "header", "heading"}:
+        return "section_header"
+    if raw in {"table", "figure", "equation"}:
+        return raw.capitalize()
+    return "paragraph"
+
+
+def _normalize_layout_label(raw_label: str) -> str:
+    label = raw_label.strip().lower()
+    if label in {"text", "paragraph"}:
+        return "paragraph"
+    if label in {"title", "header", "heading", "section_header"}:
+        return "section_header"
+    if label == "figure":
+        return "Figure"
+    if label == "table":
+        return "Table"
+    if label == "equation":
+        return "Equation"
+    return raw_label.strip() or "paragraph"
+
+
+def _build_columnar_fields(blocks: list[dict]) -> dict:
+    text_list: list[str] = []
+    type_list: list[str] = []
+    coordinates_list: list[list[float]] = []
+
+    for block in blocks:
+        content = str(block.get("content") or "")
+        box = block.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+
+        text_list.append(content)
+        type_list.append(_normalize_block_type(block))
+        coordinates_list.append([float(c) for c in box])
+
+    return {
+        "Text": text_list,
+        "Type": type_list,
+        "Coordinates": coordinates_list,
+    }
+
+
+class SaveEditedPayload(BaseModel):
+    output_folder: str
+    data: dict
+    document_name: str | None = None
 
 
 def _extract_with_pdf2data(file_path: Path, input_tmp: str, output_tmp: str) -> list[dict]:
@@ -34,31 +89,50 @@ def _extract_with_pdf2data(file_path: Path, input_tmp: str, output_tmp: str) -> 
         input_folder=input_tmp,
         output_folder=output_tmp,
         extract_text=True,
+        extract_tables=True,
+        extract_figures=True,
+        extract_equations=True,
+        extract_references=False,
     )
+    pipeline.pdf_transform()
 
-    doc_layout = pipeline._mask.get_layout(str(file_path))
-    boxes_by_page = doc_layout.get("boxes", []) if isinstance(doc_layout, dict) else []
+    content_files = sorted(Path(output_tmp).rglob("*_content.json"))
+    if not content_files:
+        raise RuntimeError(
+            "PDF2Data did not generate any *_content.json output. Verify pdf2data-tools installation/version."
+        )
 
+    with open(content_files[0], "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+
+    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
     blocks_data: list[dict] = []
-    next_id = 0
-    for page_idx, page_boxes in enumerate(boxes_by_page):
-        page_number = page_idx + 1
-        print(f"DEBUG: PDF2Data detected {len(page_boxes)} blocks on page {page_number}.")
-        for box in page_boxes:
-            blocks_data.append(
-                {
-                    "id": next_id,
-                    "page": page_number,
-                    "box": [float(c) for c in box],
-                    "originalBox": [float(c) for c in box],
-                    "content": "",
-                    "font_size": 11.0,
-                    "color": (0, 0, 0),
-                    "source": "pdf2data",
-                }
-            )
-            next_id += 1
+    for idx, block in enumerate(raw_blocks):
+        box = block.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
 
+        block_type = str(block.get("type") or "")
+        content = block.get("content")
+        if not content:
+            content = block.get("legend") or block.get("caption") or block_type
+
+        normalized_block = {
+            **block,
+            "id": idx,
+            "page": int(block.get("page", 1)),
+            "box": [float(c) for c in box],
+            "originalBox": [float(c) for c in box],
+            "content": str(content or ""),
+            "type": _normalize_layout_label(block_type),
+            "layout_type": block_type or _normalize_layout_label(block_type),
+            "font_size": float(block.get("font_size", 11.0)),
+            "color": block.get("color", (0, 0, 0)),
+            "source": "pdf2data",
+        }
+        blocks_data.append(normalized_block)
+
+    print(f"DEBUG: PDF2Data normalized {len(blocks_data)} blocks from *_content.json.")
     return blocks_data
 
 
@@ -244,8 +318,10 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
                 )
 
             if processor_name == "pdf2data":
-                # Fill content from original PDF text boxes for PDF2Data boxes.
+                # Backfill missing text content from PDF for any empty text-like block.
                 for block in blocks_data:
+                    if str(block.get("content") or "").strip():
+                        continue
                     page_number = int(block.get("page", 1))
                     if page_number < 1 or page_number > doc.page_count:
                         continue
@@ -264,6 +340,9 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
                 "id": file_id,
                 "processor": processor_name,
                 "blocks": blocks_data,
+                **_build_columnar_fields(blocks_data),
+                "amount": len(blocks_data),
+                "doi": "",
                 "pdf_size": pdf_size,
                 "page_sizes": page_sizes,
             }
@@ -271,6 +350,45 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/save-edited-json")
+async def save_edited_json(payload: SaveEditedPayload):
+    try:
+        output_root = Path(payload.output_folder).expanduser()
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        data = dict(payload.data)
+        blocks = data.get("blocks")
+        if isinstance(blocks, list):
+            data.update(_build_columnar_fields(blocks))
+            data["amount"] = len(blocks)
+
+        data.setdefault("doi", "")
+        raw_name = str(payload.document_name or data.get("id") or uuid.uuid4()).strip()
+        safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
+        safe_name = safe_name or str(uuid.uuid4())
+
+        doc_folder = output_root / safe_name
+        images_folder = doc_folder / f"{safe_name}_images"
+        doc_folder.mkdir(parents=True, exist_ok=True)
+        images_folder.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{safe_name}_content.json"
+        file_path = doc_folder / filename
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        return {
+            "saved_path": str(file_path),
+            "saved_folder": str(doc_folder),
+            "images_folder": str(images_folder),
+            "filename": filename,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to save edited JSON: {e}")
 
 if __name__ == "__main__":
     import uvicorn

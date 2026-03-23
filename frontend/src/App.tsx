@@ -20,6 +20,8 @@ const App = () => {
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
+  const [outputFolderHandle, setOutputFolderHandle] = useState<any | null>(null);
+  const [outputFolderName, setOutputFolderName] = useState('No folder selected');
 
   const parsedState = useMemo(() => {
     if (!jsonDraft.trim()) return null;
@@ -119,57 +121,90 @@ const App = () => {
     if (!next.blocks[selectedIndex]) return;
 
     next.blocks[selectedIndex].content = value;
+    if (Array.isArray(next.Text) && selectedIndex < next.Text.length) {
+      next.Text[selectedIndex] = value;
+    }
     setJsonDraft(JSON.stringify(next, null, 2));
   };
 
   const exportJson = async () => {
     if (!parsedData) return;
-
-    const baseName = sourceFilename.replace(/\.[^/.]+$/, '') || 'metadata';
-    const filename = `${baseName}_edited.json`;
-    const jsonContent = JSON.stringify(parsedData, null, 2);
-
-    const filePickerWindow = window as Window & {
-      showSaveFilePicker?: (options?: {
-        suggestedName?: string;
-        types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-      }) => Promise<{
-        createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
-      }>;
-    };
-
-    if (filePickerWindow.showSaveFilePicker) {
-      try {
-        const handle = await filePickerWindow.showSaveFilePicker({
-          suggestedName: filename,
-          types: [
-            {
-              description: 'JSON file',
-              accept: { 'application/json': ['.json'] },
-            },
-          ],
-        });
-
-        const writable = await handle.createWritable();
-        await writable.write(new Blob([jsonContent], { type: 'application/json' }));
-        await writable.close();
-        return;
-      } catch {
-        // User canceled the dialog or browser blocked the picker.
-        return;
-      }
+    if (!outputFolderHandle) {
+      setValidationMessage('Choose an output folder first.');
+      window.setTimeout(() => setValidationMessage(null), 3200);
+      return;
     }
 
-    // Fallback for browsers without File System Access API.
-    const blob = new Blob([JSON.stringify(parsedData, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    const baseName = sourceFilename.replace(/\.[^/.]+$/, '') || 'metadata';
+
+    const safeName = baseName
+      .split('')
+      .map((ch) => (/^[a-zA-Z0-9_-]$/.test(ch) ? ch : '_'))
+      .join('');
+
+    const exportData = JSON.parse(JSON.stringify(parsedData));
+    if (Array.isArray(exportData.blocks)) {
+      exportData.Text = exportData.blocks.map((block: any) => String(block?.content ?? ''));
+      exportData.Type = exportData.blocks.map((block: any) => String(block?.type ?? 'paragraph'));
+      exportData.Coordinates = exportData.blocks
+        .map((block: any) => block?.box)
+        .filter((box: any) => Array.isArray(box) && box.length === 4)
+        .map((box: any) => box.map((n: any) => Number(n)));
+      exportData.amount = exportData.blocks.length;
+    }
+    if (!('doi' in exportData)) exportData.doi = '';
+
+    try {
+      const docFolder = await outputFolderHandle.getDirectoryHandle(safeName || 'metadata', { create: true });
+      await docFolder.getDirectoryHandle(`${safeName || 'metadata'}_images`, { create: true });
+      const fileHandle = await docFolder.getFileHandle(`${safeName || 'metadata'}_content.json`, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
+      await writable.close();
+
+      setValidationMessage(`Saved folder: ${outputFolderName}/${safeName || 'metadata'}`);
+      window.setTimeout(() => setValidationMessage(null), 3200);
+    } catch (err: any) {
+      setValidationMessage(`Save failed: ${err.message || 'unknown error'}`);
+      window.setTimeout(() => setValidationMessage(null), 3200);
+    }
+  };
+
+  const chooseOutputFolder = async () => {
+    const pickerWindow = window as Window & {
+      showDirectoryPicker?: (options?: {
+        mode?: 'read' | 'readwrite';
+        startIn?: 'documents' | 'downloads' | 'desktop' | 'music' | 'pictures' | 'videos';
+        id?: string;
+      }) => Promise<any>;
+    };
+
+    if (!pickerWindow.showDirectoryPicker) {
+      setValidationMessage('Folder picker is not supported in this browser. Use a Chromium-based browser.');
+      window.setTimeout(() => setValidationMessage(null), 3200);
+      return;
+    }
+
+    try {
+      const handle = await pickerWindow.showDirectoryPicker({
+        mode: 'readwrite',
+        startIn: 'documents',
+        id: 'pdf-workflow-output',
+      });
+      setOutputFolderHandle(handle);
+      setOutputFolderName(handle?.name || 'Selected folder');
+      setValidationMessage(null);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return;
+      }
+      if (err?.name === 'SecurityError' || err?.name === 'NotAllowedError') {
+        setValidationMessage('This folder is blocked by the browser. Choose a normal user folder (e.g. Documents/pdf-outputs).');
+        window.setTimeout(() => setValidationMessage(null), 3600);
+        return;
+      }
+      // User canceled folder selection.
+    }
   };
 
   const previewBlocks = Array.isArray(parsedData?.blocks) ? parsedData.blocks : [];
@@ -366,6 +401,21 @@ const App = () => {
               >
                 {loading ? <Loader2 className="animate-spin" /> : 'EXPORT JSON'}
               </button>
+
+              <button
+                onClick={chooseOutputFolder}
+                className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all"
+              >
+                Choose Output Folder
+              </button>
+
+              <div className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl px-3 py-2 text-xs text-zinc-300">
+                {outputFolderName}
+              </div>
+
+              <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
+                Tip: choose a user folder like <code>Documents/pdf-outputs</code>, not system/root folders.
+              </div>
 
               <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
                 Blocks in preview: {previewBlocks.length} | Pages: {numPages || 1}
