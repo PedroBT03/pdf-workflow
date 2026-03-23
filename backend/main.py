@@ -1,12 +1,9 @@
-import os
-import sys
 import uuid
 import shutil
 import traceback
+import tempfile
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import fitz
 
@@ -20,14 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-RESULTS_DIR = BASE_DIR / "results"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
-app.mount("/files", StaticFiles(directory=str(UPLOAD_DIR)), name="files")
-
 @app.post("/api/upload")
 async def upload_and_process(file: UploadFile = File(...)):
     try:
@@ -37,60 +26,84 @@ async def upload_and_process(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500,
             detail=(
-                f"Dependencia em falta para processamento de PDF: '{e.name}'. "
-                "Instala as dependencias de ML para usar /api/upload."
+                f"Missing dependency for PDF processing: '{e.name}'. "
+                "Install the ML dependencies to use /api/upload."
             ),
         )
 
     file_id = str(uuid.uuid4())
-    filename = f"{file_id}.pdf"
-    file_path = UPLOAD_DIR / filename
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
 
     try:
-        pipeline = PDF2Data(
-            layout_model="DocLayout-YOLO-DocStructBench",
-            layout_model_threshold=0.5,
-            table_model=None,
-            table_model_threshold=0.5,
-            device="cpu",
-            input_folder=str(UPLOAD_DIR),
-            output_folder=str(RESULTS_DIR),
-            extract_text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="pdfwf_in_") as input_tmp, tempfile.TemporaryDirectory(
+            prefix="pdfwf_out_"
+        ) as output_tmp:
+            filename = f"{file_id}.pdf"
+            file_path = Path(input_tmp) / filename
 
-        doc_layout = pipeline._mask.get_layout(str(file_path))
-        doc = fitz.open(str(file_path))
-        page = doc[0]
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
-        blocks_data = []
-        if "boxes" in doc_layout and len(doc_layout["boxes"]) > 0:
-            boxes = doc_layout["boxes"][0]
-            print(f"DEBUG: IA detectou {len(boxes)} blocos.")
-            for i, box in enumerate(boxes):
-                rect = fitz.Rect(box)
-                blocks_data.append(
+            pipeline = PDF2Data(
+                layout_model="DocLayout-YOLO-DocStructBench",
+                layout_model_threshold=0.5,
+                table_model=None,
+                table_model_threshold=0.5,
+                device="cpu",
+                input_folder=input_tmp,
+                output_folder=output_tmp,
+                extract_text=True,
+            )
+
+            doc_layout = pipeline._mask.get_layout(str(file_path))
+            doc = fitz.open(str(file_path))
+
+            blocks_data = []
+            page_sizes = []
+            boxes_by_page = doc_layout.get("boxes", []) if isinstance(doc_layout, dict) else []
+            next_id = 0
+
+            for page_idx in range(doc.page_count):
+                page_number = page_idx + 1
+                page = doc[page_idx]
+                page_sizes.append(
                     {
-                        "id": i,
-                        "box": [float(c) for c in box],
-                        "originalBox": [float(c) for c in box],
-                        "content": page.get_textbox(rect).strip() or " ",
-                        "font_size": 11.0,
-                        "color": (0, 0, 0),
+                        "page": page_number,
+                        "width": page.rect.width,
+                        "height": page.rect.height,
                     }
                 )
 
-        pdf_size = {"width": page.rect.width, "height": page.rect.height}
-        doc.close()
+                page_boxes = boxes_by_page[page_idx] if page_idx < len(boxes_by_page) else []
+                print(f"DEBUG: AI detected {len(page_boxes)} blocks on page {page_number}.")
 
-        return {
-            "id": file_id,
-            "pdf_url": f"http://localhost:8000/files/{filename}",
-            "blocks": blocks_data,
-            "pdf_size": pdf_size,
-        }
+                for box in page_boxes:
+                    rect = fitz.Rect(box)
+                    blocks_data.append(
+                        {
+                            "id": next_id,
+                            "page": page_number,
+                            "box": [float(c) for c in box],
+                            "originalBox": [float(c) for c in box],
+                            "content": page.get_textbox(rect).strip() or " ",
+                            "font_size": 11.0,
+                            "color": (0, 0, 0),
+                        }
+                    )
+                    next_id += 1
+
+            pdf_size = (
+                {"width": page_sizes[0]["width"], "height": page_sizes[0]["height"]}
+                if page_sizes
+                else {"width": 0, "height": 0}
+            )
+            doc.close()
+
+            return {
+                "id": file_id,
+                "blocks": blocks_data,
+                "pdf_size": pdf_size,
+                "page_sizes": page_sizes,
+            }
 
     except Exception as e:
         traceback.print_exc()

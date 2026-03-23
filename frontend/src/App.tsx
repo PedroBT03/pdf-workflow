@@ -1,8 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Stage, Layer, Rect, Text, Transformer } from 'react-konva';
-import { Download, Upload, CheckCircle, FileText, Loader2, MousePointer2 } from 'lucide-react';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { Download, Upload, FileText, Loader2, Braces, CheckCircle2 } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
@@ -11,34 +9,46 @@ import 'react-pdf/dist/Page/TextLayer.css';
 
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
-  const [blocks, setBlocks] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState('');
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-
-  const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  const [selectedContent, setSelectedContent] = useState('');
+  const [validationMessage, setValidationMessage] = useState<string | null>(null);
+  const [numPages, setNumPages] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
-  // Guardar os bytes originais do PDF para o pdf-lib poder modificar
-  const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
+  const [sourceFilename, setSourceFilename] = useState('metadata');
 
-  const shapeRef = useRef<any>(null);
-  const trRef = useRef<any>(null);
+  const parsedState = useMemo(() => {
+    if (!jsonDraft.trim()) return null;
+
+    try {
+      return { data: JSON.parse(jsonDraft), error: null as string | null };
+    } catch (err: any) {
+      return { data: null, error: err.message as string };
+    }
+  }, [jsonDraft]);
+
+  const parsedData = parsedState?.data ?? null;
+  const jsonError = parsedState?.error ?? null;
 
   useEffect(() => {
-    if (selectedIndex !== null && trRef.current && shapeRef.current) {
-      trRef.current.nodes([shapeRef.current]);
-      trRef.current.getLayer().batchDraw();
+    if (selectedIndex === null || !Array.isArray(parsedData?.blocks)) {
+      setSelectedContent('');
+      return;
     }
-  }, [selectedIndex]);
 
-  // 1. UPLOAD E PROCESSAMENTO
+    const block = parsedData.blocks[selectedIndex];
+    setSelectedContent(typeof block?.content === 'string' ? block.content : '');
+  }, [selectedIndex, parsedData]);
+
+  // 1. Upload and process document
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setLoading(true);
-    setSelectedIndex(null);
-    setDownloadUrl(null);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -49,199 +59,131 @@ const App = () => {
         body: formData,
       });
 
-      if (!response.ok) throw new Error('Falha no processamento da IA');
+      if (!response.ok) throw new Error('AI processing failed');
       const data = await response.json();
 
-      const pdfBlobResponse = await fetch(data.pdf_url);
-      const blob = await pdfBlobResponse.blob();
-      const arrayBuffer = await blob.arrayBuffer();
-
-      setPdfFile(blob);
-      setPdfBytes(arrayBuffer);
-      setBlocks(data.blocks);
+      setPdfFile(file);
+      setSourceFilename(file.name);
       setDocData(data);
+      setJsonDraft(JSON.stringify(data, null, 2));
+      setSelectedIndex(null);
+      setSelectedContent('');
+      setValidationMessage(null);
+      setNumPages(0);
+      setCurrentPage(1);
+      setPageSizes({});
     } catch (err: any) {
       console.error(err);
-      alert('Erro: ' + err.message);
+      alert('Error: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const onPageLoadSuccess = (page: any) => {
+  const onDocumentLoadSuccess = ({ numPages: totalPages }: { numPages: number }) => {
+    setNumPages(totalPages);
+    setCurrentPage(1);
+  };
+
+  const onPageLoadSuccess = (pageNumber: number, page: any) => {
     const viewport = page.getViewport({ scale: 1.5 });
-    setPageSize({ width: viewport.width, height: viewport.height });
+    const nextScale = viewport.width / page.originalWidth;
+    setPageSizes((prev) => ({
+      ...prev,
+      [pageNumber]: {
+        width: viewport.width,
+        height: viewport.height,
+        scale: nextScale,
+      },
+    }));
   };
 
-  const scale = docData ? pageSize.width / docData.pdf_size.width : 1;
-
-  // 2. LÓGICA DE EDIÇÃO E REFLOW
-  const handleContentChange = (newContent: string) => {
-    if (selectedIndex === null) return;
-
-    const updated = [...blocks];
-    const b = updated[selectedIndex];
-
-    const lines = newContent.split('\n').length || 1;
-    const lineHeight = b.font_size * 1.2;
-    const newH = Math.max(lineHeight, lines * lineHeight);
-    const diff = newH - (b.box[3] - b.box[1]);
-
-    b.content = newContent;
-    b.box[3] = b.box[1] + newH;
-    b.isModified = true;
-
-    updated.forEach((other, idx) => {
-      if (idx !== selectedIndex && other.box[1] > b.box[1]) {
-        const hasHorizontalOverlap =
-          Math.min(b.box[2], other.box[2]) > Math.max(b.box[0], other.box[0]);
-        if (hasHorizontalOverlap) {
-          other.box[1] += diff;
-          other.box[3] += diff;
-          other.isShifted = true;
-        }
-      }
-    });
-
-    setBlocks(updated);
-  };
-
-  const handleTransformEnd = (e: any) => {
-    if (selectedIndex === null) return;
-    const node = e.target;
-
-    const newX = node.x();
-    const newY = node.y();
-    const newW = node.width() * node.scaleX();
-    const newH = node.height() * node.scaleY();
-
-    const updated = [...blocks];
-    updated[selectedIndex].box = [
-      newX / scale,
-      newY / scale,
-      (newX + newW) / scale,
-      (newY + newH) / scale,
-    ];
-    updated[selectedIndex].isModified = true;
-
-    node.scaleX(1);
-    node.scaleY(1);
-
-    setBlocks(updated);
-  };
-
-  // 3. EXPORTAÇÃO COM PDF-LIB
-  const savePdf = async () => {
-    if (!pdfBytes) return;
-    setLoading(true);
-
+  const formatJson = () => {
     try {
-      // Carregar o PDF original
-      const pdfDoc = await PDFDocument.load(pdfBytes);
-      const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-
-      const page = pdfDoc.getPages()[0];
-      const { height: pageHeight } = page.getSize();
-
-      for (const b of blocks) {
-        if (!b.isModified && !b.isShifted) continue;
-
-        const [x1, y1, x2, y2] = b.box;
-        const boxWidth = x2 - x1;
-        const boxHeight = y2 - y1;
-
-        const pdfX = x1;
-        const pdfYBottom = pageHeight - y2;
-
-        // 1. Cobrir o texto original com um rectângulo branco
-        page.drawRectangle({
-          x: pdfX,
-          y: pdfYBottom,
-          width: boxWidth,
-          height: boxHeight,
-          color: rgb(1, 1, 1),
-          borderWidth: 0,
-        });
-
-        // 2. Escrever o novo texto
-        const fontSize = b.font_size ?? 11;
-        const lineHeight = fontSize * 1.2;
-        const sanitized = (b.content as string)
-          .replace(/[\u200b\u200c\u200d\u00ad\ufeff]/g, '')
-          .replace(/[^\x00-\xFF]/g, '?');
-        const lines = wrapText(sanitized, boxWidth, fontSize, helveticaFont);
-
-        lines.forEach((line, lineIdx) => {
-          const textY = pageHeight - y1 - fontSize - lineIdx * lineHeight;
-
-          // Só desenha se ainda estiver dentro da caixa
-          if (textY >= pdfYBottom) {
-            page.drawText(line, {
-              x: pdfX + 1,
-              y: textY,
-              size: fontSize,
-              font: helveticaFont,
-              color: rgb(0, 0, 0),
-              maxWidth: boxWidth - 2,
-            });
-          }
-        });
-      }
-
-      // Gerar o PDF modificado e fazer download direto
-      const modifiedPdfBytes = await pdfDoc.save();
-      const blob = new Blob([modifiedPdfBytes.buffer as ArrayBuffer], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-
-      // Revogar URL anterior se existir
-      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-      setDownloadUrl(url);
-    } catch (err) {
-      console.error(err);
-      alert('Erro ao exportar PDF.');
-    } finally {
-      setLoading(false);
+      const parsed = JSON.parse(jsonDraft);
+      setJsonDraft(JSON.stringify(parsed, null, 2));
+      setValidationMessage('JSON is valid and formatted.');
+      window.setTimeout(() => setValidationMessage(null), 2200);
+    } catch {
+      setValidationMessage(null);
     }
   };
 
-  // Utilitário: quebrar texto em linhas que caibam na largura da caixa
-  const wrapText = (
-    text: string,
-    maxWidth: number,
-    fontSize: number,
-    font: any
-  ): string[] => {
-    const result: string[] = [];
-    const paragraphs = text.split('\n');
+  const updateSelectedContent = (value: string) => {
+    setSelectedContent(value);
+    if (selectedIndex === null || !parsedData || !Array.isArray(parsedData.blocks)) return;
 
-    for (const paragraph of paragraphs) {
-      if (paragraph.trim() === '') {
-        result.push('');
-        continue;
+    const next = JSON.parse(JSON.stringify(parsedData));
+    if (!next.blocks[selectedIndex]) return;
+
+    next.blocks[selectedIndex].content = value;
+    setJsonDraft(JSON.stringify(next, null, 2));
+  };
+
+  const exportJson = async () => {
+    if (!parsedData) return;
+
+    const baseName = sourceFilename.replace(/\.[^/.]+$/, '') || 'metadata';
+    const filename = `${baseName}_edited.json`;
+    const jsonContent = JSON.stringify(parsedData, null, 2);
+
+    const filePickerWindow = window as Window & {
+      showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+        types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+      }) => Promise<{
+        createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+      }>;
+    };
+
+    if (filePickerWindow.showSaveFilePicker) {
+      try {
+        const handle = await filePickerWindow.showSaveFilePicker({
+          suggestedName: filename,
+          types: [
+            {
+              description: 'JSON file',
+              accept: { 'application/json': ['.json'] },
+            },
+          ],
+        });
+
+        const writable = await handle.createWritable();
+        await writable.write(new Blob([jsonContent], { type: 'application/json' }));
+        await writable.close();
+        return;
+      } catch {
+        // User canceled the dialog or browser blocked the picker.
+        return;
       }
-      const words = paragraph.split(' ');
-      let currentLine = '';
-
-      for (const word of words) {
-        const testLine = currentLine ? `${currentLine} ${word}` : word;
-        let lineWidth = 0;
-        try {
-          lineWidth = font.widthOfTextAtSize(testLine, fontSize);
-        } catch {
-          lineWidth = testLine.length * fontSize * 0.6;
-        }
-
-        if (lineWidth > maxWidth && currentLine !== '') {
-          result.push(currentLine);
-          currentLine = word;
-        } else {
-          currentLine = testLine;
-        }
-      }
-      if (currentLine) result.push(currentLine);
     }
 
-    return result;
+    // Fallback for browsers without File System Access API.
+    const blob = new Blob([JSON.stringify(parsedData, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const previewBlocks = Array.isArray(parsedData?.blocks) ? parsedData.blocks : [];
+  const currentPageBlocks: Array<{ block: any; index: number }> = previewBlocks
+    .map((block: any, i: number) => ({ block, index: i }))
+    .filter(({ block }: { block: any }) => Number(block?.page ?? 1) === currentPage);
+  const selectedBlock = selectedIndex !== null ? previewBlocks[selectedIndex] : null;
+
+  const goToPreviousPage = () => {
+    setSelectedIndex(null);
+    setCurrentPage((p) => Math.max(1, p - 1));
+  };
+
+  const goToNextPage = () => {
+    setSelectedIndex(null);
+    setCurrentPage((p) => Math.min(numPages || 1, p + 1));
   };
 
   return (
@@ -251,19 +193,19 @@ const App = () => {
           <div className="bg-blue-600/10 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-8">
             <FileText className="w-10 h-10 text-blue-500" />
           </div>
-          <h1 className="text-4xl font-black mb-2 tracking-tighter">PDF EDITOR IA</h1>
-          <p className="text-zinc-500 mb-10 text-lg">Edição Profissional com Redação</p>
+          <h1 className="text-4xl font-black mb-2 tracking-tighter">PDF METADATA EDITOR</h1>
+          <p className="text-zinc-500 mb-10 text-lg">PDF preview + metadata JSON editing/export</p>
 
           <label className="cursor-pointer group">
             <div className="bg-blue-600 group-hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl transition-all shadow-lg shadow-blue-900/20 flex items-center justify-center gap-3">
-              <Upload className="w-5 h-5" /> Selecionar Documento
+              <Upload className="w-5 h-5" /> Select Document
             </div>
             <input type="file" onChange={handleUpload} className="hidden" accept=".pdf" />
           </label>
 
           {loading && (
             <div className="mt-10 flex items-center justify-center gap-3 text-blue-400 font-mono text-sm animate-pulse">
-              <Loader2 className="w-4 h-4 animate-spin" /> PROCESSANDO...
+              <Loader2 className="w-4 h-4 animate-spin" /> PROCESSING...
             </div>
           )}
         </div>
@@ -274,134 +216,146 @@ const App = () => {
           <div className="relative bg-zinc-900 rounded-2xl shadow-2xl border-2 border-zinc-800 overflow-hidden">
             {pdfFile && (
               <>
-                <Document file={pdfFile}>
-                  <Page
-                    pageNumber={1}
-                    scale={1.5}
-                    onLoadSuccess={onPageLoadSuccess}
-                    renderTextLayer={false}
-                    renderAnnotationLayer={false}
-                  />
+                <Document file={pdfFile} onLoadSuccess={onDocumentLoadSuccess}>
+                  <div className="relative">
+                    <Page
+                      pageNumber={currentPage}
+                      scale={1.5}
+                      onLoadSuccess={(page) => onPageLoadSuccess(currentPage, page)}
+                      onLoadError={() => null}
+                      renderTextLayer={false}
+                      renderAnnotationLayer={false}
+                    />
+
+                    {pageSizes[currentPage] && (
+                      <div
+                        className="absolute top-0 left-0 pointer-events-none"
+                        style={{
+                          width: pageSizes[currentPage].width,
+                          height: pageSizes[currentPage].height,
+                        }}
+                      >
+                        {currentPageBlocks.map(({ block, index }: { block: any; index: number }) => {
+                          const box = block?.box;
+                          if (!Array.isArray(box) || box.length !== 4) {
+                            return null;
+                          }
+
+                          const [x1, y1, x2, y2] = box;
+                          const left = x1 * pageSizes[currentPage].scale;
+                          const top = y1 * pageSizes[currentPage].scale;
+                          const width = (x2 - x1) * pageSizes[currentPage].scale;
+                          const height = (y2 - y1) * pageSizes[currentPage].scale;
+                          const isSelected = selectedIndex === index;
+
+                          return (
+                            <div
+                              key={index}
+                              className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                                isSelected
+                                  ? 'border-2 border-amber-300 bg-amber-300/20'
+                                  : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
+                              }`}
+                              style={{ left, top, width, height }}
+                              title={block?.content || `Block ${index}`}
+                              onClick={() => setSelectedIndex(index)}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </Document>
 
-                <div className="absolute top-0 left-0">
-                  <Stage width={pageSize.width} height={pageSize.height}>
-                    <Layer>
-                      {blocks.map((block, i) => {
-                        const [x1, y1, x2, y2] = block.box;
-                        const isSelected = selectedIndex === i;
-                        const isChanged = block.isModified || block.isShifted;
-
-                        return (
-                          <React.Fragment key={i}>
-                            <Rect
-                              ref={isSelected ? shapeRef : null}
-                              x={x1 * scale}
-                              y={y1 * scale}
-                              width={(x2 - x1) * scale}
-                              height={(y2 - y1) * scale}
-                              fill={isChanged ? 'white' : 'rgba(59, 130, 246, 0.05)'}
-                              stroke={
-                                isSelected
-                                  ? '#3b82f6'
-                                  : isChanged
-                                  ? '#f59e0b'
-                                  : 'rgba(255,255,255,0.1)'
-                              }
-                              strokeWidth={isSelected ? 3 : 1}
-                              draggable={isSelected}
-                              onClick={() => setSelectedIndex(i)}
-                              onDragEnd={handleTransformEnd}
-                              onTransformEnd={handleTransformEnd}
-                              onMouseEnter={(e: any) =>
-                                (e.target.getStage().container().style.cursor = 'pointer')
-                              }
-                              onMouseLeave={(e: any) =>
-                                (e.target.getStage().container().style.cursor = 'default')
-                              }
-                            />
-
-                            {(isChanged || isSelected) && (
-                              <Text
-                                x={x1 * scale + 2}
-                                y={y1 * scale + 2}
-                                text={block.content}
-                                fontSize={block.font_size * scale}
-                                width={(x2 - x1) * scale - 4}
-                                fill="black"
-                                listening={false}
-                              />
-                            )}
-                          </React.Fragment>
-                        );
-                      })}
-                      {selectedIndex !== null && (
-                        <Transformer
-                          ref={trRef}
-                          rotateEnabled={false}
-                          keepRatio={false}
-                          boundBoxFunc={(oldBox, newBox) => {
-                            if (newBox.width < 10 || newBox.height < 10) return oldBox;
-                            return newBox;
-                          }}
-                        />
-                      )}
-                    </Layer>
-                  </Stage>
+                <div className="flex items-center justify-between gap-3 p-3 border-t border-zinc-800 bg-zinc-950/60">
+                  <button
+                    onClick={goToPreviousPage}
+                    disabled={currentPage <= 1}
+                    className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <div className="text-sm text-zinc-400">
+                    Page {currentPage} / {numPages || 1}
+                  </div>
+                  <button
+                    onClick={goToNextPage}
+                    disabled={currentPage >= (numPages || 1)}
+                    className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
                 </div>
               </>
             )}
           </div>
 
-          {/* SIDEBAR EDITOR */}
+          {/* JSON editor sidebar */}
           <div className="w-96 flex flex-col gap-6 sticky top-6">
             <div className="bg-zinc-900 p-8 rounded-3xl border border-zinc-800 shadow-xl">
               <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-                <MousePointer2 className="w-5 h-5 text-blue-500" /> Editor de Texto
+                <Braces className="w-5 h-5 text-blue-500" /> Metadata Editor (JSON)
               </h2>
 
-              {selectedIndex !== null ? (
-                <div className="flex flex-col gap-5">
-                  <textarea
-                    className="w-full h-64 p-5 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
-                    value={blocks[selectedIndex].content}
-                    onChange={(e) => handleContentChange(e.target.value)}
-                  />
-                  <div className="text-xs text-zinc-500 bg-zinc-800/50 p-4 rounded-xl">
-                    Dica: Podes arrastar ou redimensionar a caixa azul no PDF para ajustar o layout.
-                  </div>
-                  <button
-                    onClick={() => setSelectedIndex(null)}
-                    className="w-full bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-bold transition-all"
-                  >
-                    Pronto
-                  </button>
+              <div className="text-xs text-zinc-400 mb-4 bg-zinc-800/50 p-3 rounded-xl">
+                Click a box on the PDF to edit only that box metadata.
+              </div>
+
+              {selectedIndex === null ? (
+                <div className="h-72 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
+                  No box selected.
                 </div>
               ) : (
-                <div className="py-20 text-center text-zinc-600 italic border-2 border-dashed border-zinc-800 rounded-3xl px-6">
-                  Clica numa caixa no PDF para editar o seu conteúdo.
+                <div className="flex flex-col gap-3">
+                  <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                    Selected box: #{selectedIndex + 1}
+                  </div>
+                  {selectedBlock && (
+                    <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                      Page: {selectedBlock.page ?? 1}
+                    </div>
+                  )}
+                  <textarea
+                    className="w-full h-72 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
+                    value={selectedContent}
+                    onChange={(e) => updateSelectedContent(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {jsonError && (
+                <div className="mt-3 text-xs text-red-300 bg-red-950/40 border border-red-900 p-3 rounded-xl">
+                  Invalid JSON: {jsonError}
+                </div>
+              )}
+
+              <button
+                onClick={formatJson}
+                className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className={`w-4 h-4 ${validationMessage ? 'text-emerald-400' : 'text-zinc-400'}`} />
+                {validationMessage ? 'Validated' : 'Validate and Format JSON'}
+              </button>
+
+              {validationMessage && (
+                <div className="mt-3 text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-900 p-3 rounded-xl">
+                  {validationMessage}
                 </div>
               )}
             </div>
 
             <div className="flex flex-col gap-3">
               <button
-                onClick={savePdf}
-                disabled={loading || !docData}
+                onClick={exportJson}
+                disabled={loading || !parsedData}
                 className="w-full py-5 bg-white text-black rounded-3xl font-black text-lg hover:bg-zinc-200 transition-all disabled:bg-zinc-800 flex items-center justify-center gap-3"
               >
-                {loading ? <Loader2 className="animate-spin" /> : 'APLICAR ALTERAÇÕES'}
+                {loading ? <Loader2 className="animate-spin" /> : 'EXPORT JSON'}
               </button>
 
-              {downloadUrl && (
-                <a
-                  href={downloadUrl}
-                  className="flex items-center justify-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white p-5 rounded-3xl font-black shadow-xl animate-in slide-in-from-bottom-4 duration-500"
-                  download="documento_editado.pdf"
-                >
-                  <Download className="w-6 h-6" /> DESCARREGAR PDF
-                </a>
-              )}
+              <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
+                Blocks in preview: {previewBlocks.length} | Pages: {numPages || 1}
+              </div>
             </div>
           </div>
         </div>
