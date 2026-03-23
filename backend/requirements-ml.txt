@@ -6,3 +6,9 @@ pdf2image
 transformers
 doclayout-yolo
 paddleocr
+mineru
+ultralytics
+accelerate
+ftfy
+dill
+omegaconf

@@ -89,6 +89,20 @@ source venv/bin/activate
 python -m pip install -r requirements-ml.txt
 ```
 
+To use `processor=mineru`, make sure the MinerU CLI is installed in the same environment:
+
+```bash
+cd backend
+source venv/bin/activate
+python -m pip install -r requirements-ml.txt
+command -v mineru
+```
+
+`requirements-ml.txt` includes MinerU runtime dependencies such as `ultralytics` and `accelerate`.
+
+Note: this backend forces MinerU to run with `-b pipeline -d cpu` to avoid CUDA out-of-memory failures on low-VRAM GPUs.
+It also sets `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` for the MinerU subprocess to keep compatibility with checkpoints that fail under PyTorch's newer `weights_only=True` default.
+
 ## Resolucao de problemas
 
 Se aparecer este erro ao usar `pip`:

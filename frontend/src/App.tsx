@@ -16,6 +16,7 @@ const App = () => {
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
+  const [processor, setProcessor] = useState<'pdf2data' | 'mineru'>('pdf2data');
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
@@ -52,6 +53,7 @@ const App = () => {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('processor', processor);
 
     try {
       const response = await fetch('http://localhost:8000/api/upload', {
@@ -202,6 +204,18 @@ const App = () => {
             </div>
             <input type="file" onChange={handleUpload} className="hidden" accept=".pdf" />
           </label>
+
+          <div className="mt-5 text-left">
+            <label className="block text-xs text-zinc-400 mb-2">Processor</label>
+            <select
+              value={processor}
+              onChange={(e) => setProcessor(e.target.value as 'pdf2data' | 'mineru')}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+            >
+              <option value="pdf2data">PDF2Data</option>
+              <option value="mineru">MinerU</option>
+            </select>
+          </div>
 
           {loading && (
             <div className="mt-10 flex items-center justify-center gap-3 text-blue-400 font-mono text-sm animate-pulse">
