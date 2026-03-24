@@ -9,10 +9,14 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import fitz
 
 app = FastAPI()
+
+ASSET_CACHE_ROOT = Path(tempfile.gettempdir()) / "pdfwf_assets"
+ASSET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +73,44 @@ def _build_columnar_fields(blocks: list[dict]) -> dict:
         "Type": type_list,
         "Coordinates": coordinates_list,
     }
+
+
+def _persist_extracted_assets(file_id: str, output_tmp: str) -> int:
+    output_root = Path(output_tmp)
+    cache_folder = ASSET_CACHE_ROOT / file_id
+    if cache_folder.exists():
+        shutil.rmtree(cache_folder)
+    cache_folder.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+    for src in output_root.rglob("*"):
+        if not src.is_file() or src.suffix.lower() not in image_suffixes:
+            continue
+
+        rel = src.relative_to(output_root)
+        dest = cache_folder / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        copied += 1
+
+    return copied
+
+
+def _list_cached_assets(doc_id: str) -> list[str]:
+    doc_folder = (ASSET_CACHE_ROOT / doc_id).resolve()
+    if not doc_folder.exists() or not doc_folder.is_dir():
+        return []
+
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+    assets: list[str] = []
+    for item in doc_folder.rglob("*"):
+        if not item.is_file() or item.suffix.lower() not in image_suffixes:
+            continue
+        assets.append(item.relative_to(doc_folder).as_posix())
+
+    return sorted(assets)
 
 
 class SaveEditedPayload(BaseModel):
@@ -303,6 +345,8 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
             else:
                 blocks_data = _extract_with_mineru(input_tmp=input_tmp, output_tmp=output_tmp)
 
+            copied_assets = _persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
+
             doc = fitz.open(str(file_path))
             page_sizes = []
 
@@ -345,6 +389,7 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
                 "doi": "",
                 "pdf_size": pdf_size,
                 "page_sizes": page_sizes,
+                "assets_count": copied_assets,
             }
 
     except Exception as e:
@@ -389,6 +434,30 @@ async def save_edited_json(payload: SaveEditedPayload):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save edited JSON: {e}")
+
+
+@app.get("/api/assets/{doc_id}/{asset_path:path}")
+async def get_extracted_asset(doc_id: str, asset_path: str):
+    doc_folder = (ASSET_CACHE_ROOT / doc_id).resolve()
+    if not doc_folder.exists() or not doc_folder.is_dir():
+        raise HTTPException(status_code=404, detail="Asset document not found")
+
+    # Prevent path traversal and serve only files inside the per-document cache.
+    target = (doc_folder / asset_path).resolve()
+    if doc_folder not in target.parents and target != doc_folder:
+        raise HTTPException(status_code=400, detail="Invalid asset path")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Asset file not found")
+
+    return FileResponse(path=target)
+
+
+@app.get("/api/assets-manifest/{doc_id}")
+async def get_assets_manifest(doc_id: str):
+    return {
+        "doc_id": doc_id,
+        "assets": _list_cached_assets(doc_id),
+    }
 
 if __name__ == "__main__":
     import uvicorn

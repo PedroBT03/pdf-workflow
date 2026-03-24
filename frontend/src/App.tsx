@@ -7,6 +7,36 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.vers
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
+const API_BASE = 'http://localhost:8000';
+
+const buildAssetUrl = (docId: string, assetPath: string) => {
+  const encodedDocId = encodeURIComponent(docId);
+  const encodedPath = assetPath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+
+  return `${API_BASE}/api/assets/${encodedDocId}/${encodedPath}`;
+};
+
+const buildManifestUrl = (docId: string) => `${API_BASE}/api/assets-manifest/${encodeURIComponent(docId)}`;
+
+const stripNativeImagesPrefix = (assetPath: string) => {
+  const parts = assetPath.split('/').filter(Boolean);
+  const idx = parts.findIndex((part) => part.toLowerCase().endsWith('_images'));
+  if (idx >= 0 && idx + 1 < parts.length) {
+    return parts.slice(idx + 1).join('/');
+  }
+  return parts.length ? parts.slice(-1).join('/') : assetPath;
+};
+
+const sanitizePathSegments = (pathValue: string) =>
+  pathValue
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
+
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -89,7 +119,7 @@ const App = () => {
     formData.append('processor', processor);
 
     try {
-      const response = await fetch('http://localhost:8000/api/upload', {
+      const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -188,14 +218,94 @@ const App = () => {
     try {
       const folderName = safeName || 'metadata';
       const docFolder = await outputFolderHandle.getDirectoryHandle(folderName, { create: true });
-      await docFolder.getDirectoryHandle(`${folderName}_images`, { create: true });
+      const imagesFolder = await docFolder.getDirectoryHandle(`${folderName}_images`, { create: true });
+
+      const docId = String(docData?.id || '').trim();
+      if (!docId) {
+        throw new Error('Missing document id for asset export. Upload the PDF again.');
+      }
+
+      const manifestResponse = await fetch(buildManifestUrl(docId));
+      if (!manifestResponse.ok) {
+        throw new Error(`asset manifest request failed (${manifestResponse.status})`);
+      }
+      const manifestPayload = await manifestResponse.json();
+      const manifestAssets: string[] = Array.isArray(manifestPayload?.assets) ? manifestPayload.assets : [];
+
+      let copiedImages = 0;
+      let failedImages = 0;
+      const exportedAssetPaths = new Map<string, string>();
+
+      for (const rawPath of manifestAssets) {
+        const trimmedPath = String(rawPath || '').trim();
+        if (!trimmedPath) continue;
+
+        const normalizedRelative = stripNativeImagesPrefix(trimmedPath);
+        const safeSegments = sanitizePathSegments(normalizedRelative);
+        if (!safeSegments.length) {
+          failedImages += 1;
+          continue;
+        }
+
+        try {
+          const response = await fetch(buildAssetUrl(docId, trimmedPath));
+          if (!response.ok) {
+            throw new Error(`asset request failed (${response.status})`);
+          }
+
+          const blob = await response.blob();
+          let targetDir = imagesFolder;
+          for (const segment of safeSegments.slice(0, -1)) {
+            targetDir = await targetDir.getDirectoryHandle(segment, { create: true });
+          }
+
+          const fileName = safeSegments[safeSegments.length - 1];
+          const imageFileHandle = await targetDir.getFileHandle(fileName, { create: true });
+          const imageWritable = await imageFileHandle.createWritable();
+          await imageWritable.write(blob);
+          await imageWritable.close();
+
+          const exportedRel = `${folderName}_images/${safeSegments.join('/')}`;
+          exportedAssetPaths.set(trimmedPath, exportedRel);
+          copiedImages += 1;
+        } catch {
+          failedImages += 1;
+        }
+      }
+
+      if (Array.isArray(exportData.blocks)) {
+        for (const block of exportData.blocks) {
+          if (typeof block?.filepath !== 'string') continue;
+          const key = block.filepath.trim();
+          if (!key) continue;
+
+          const mapped = exportedAssetPaths.get(key);
+          if (mapped) {
+            block.filepath = mapped;
+            continue;
+          }
+
+          // Fallback for old JSONs where filepath omits a leading folder segment.
+          const maybeBySuffix = Array.from(exportedAssetPaths.entries()).find(([src]) => src.endsWith(key));
+          if (maybeBySuffix) {
+            block.filepath = maybeBySuffix[1];
+          }
+        }
+      }
+
       const fileName = `${folderName}_content.json`;
       const fileHandle = await docFolder.getFileHandle(fileName, { create: true });
       const writable = await fileHandle.createWritable();
       await writable.write(new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
       await writable.close();
 
-      showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName}`);
+      if (manifestAssets.length === 0) {
+        showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName} (no image assets in this document).`);
+      } else if (failedImages === 0) {
+        showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName} with ${copiedImages} image asset(s).`);
+      } else {
+        showExportFeedback('info', `Saved JSON, copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
+      }
     } catch (err: any) {
       showExportFeedback('error', `Export failed: ${err.message || 'unknown error'}`, 4000);
     }
