@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Download, Upload, FileText, Loader2, Braces, CheckCircle2 } from 'lucide-react';
+import { Upload, FileText, Loader2, Braces, CheckCircle2, Download, FolderOpen } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
@@ -13,7 +13,8 @@ const App = () => {
   const [jsonDraft, setJsonDraft] = useState('');
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [selectedContent, setSelectedContent] = useState('');
-  const [validationMessage, setValidationMessage] = useState<string | null>(null);
+  const [editorFeedback, setEditorFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [processor, setProcessor] = useState<'pdf2data' | 'mineru'>('pdf2data');
@@ -21,7 +22,37 @@ const App = () => {
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
   const [outputFolderHandle, setOutputFolderHandle] = useState<any | null>(null);
-  const [outputFolderName, setOutputFolderName] = useState('No folder selected');
+  const [outputFolderName, setOutputFolderName] = useState<string>('No folder selected');
+
+  const showEditorFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
+    setEditorFeedback({ type, message });
+    if (timeout > 0) {
+      window.setTimeout(() => setEditorFeedback(null), timeout);
+    }
+  };
+
+  const showExportFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
+    setExportFeedback({ type, message });
+    if (timeout > 0) {
+      window.setTimeout(() => setExportFeedback(null), timeout);
+    }
+  };
+
+  const resetWorkflow = () => {
+    setDocData(null);
+    setJsonDraft('');
+    setSelectedIndex(null);
+    setSelectedContent('');
+    setEditorFeedback(null);
+    setExportFeedback(null);
+    setNumPages(0);
+    setCurrentPage(1);
+    setPageSizes({});
+    setPdfFile(null);
+    setSourceFilename('metadata');
+    setOutputFolderHandle(null);
+    setOutputFolderName('No folder selected');
+  };
 
   const parsedState = useMemo(() => {
     if (!jsonDraft.trim()) return null;
@@ -72,15 +103,17 @@ const App = () => {
       setJsonDraft(JSON.stringify(data, null, 2));
       setSelectedIndex(null);
       setSelectedContent('');
-      setValidationMessage(null);
+      setEditorFeedback(null);
+      setExportFeedback(null);
       setNumPages(0);
       setCurrentPage(1);
       setPageSizes({});
     } catch (err: any) {
       console.error(err);
-      alert('Error: ' + err.message);
+      showEditorFeedback('error', `Error processing PDF: ${err.message || 'unknown error'}`, 4000);
     } finally {
       setLoading(false);
+      e.target.value = '';
     }
   };
 
@@ -106,10 +139,9 @@ const App = () => {
     try {
       const parsed = JSON.parse(jsonDraft);
       setJsonDraft(JSON.stringify(parsed, null, 2));
-      setValidationMessage('JSON is valid and formatted.');
-      window.setTimeout(() => setValidationMessage(null), 2200);
+      showEditorFeedback('success', 'JSON is valid and formatted.', 2200);
     } catch {
-      setValidationMessage(null);
+      showEditorFeedback('error', 'JSON is invalid. Fix it before exporting.', 3200);
     }
   };
 
@@ -130,8 +162,7 @@ const App = () => {
   const exportJson = async () => {
     if (!parsedData) return;
     if (!outputFolderHandle) {
-      setValidationMessage('Choose an output folder first.');
-      window.setTimeout(() => setValidationMessage(null), 3200);
+      showExportFeedback('error', 'Choose an output folder first.', 3600);
       return;
     }
 
@@ -155,18 +186,18 @@ const App = () => {
     if (!('doi' in exportData)) exportData.doi = '';
 
     try {
-      const docFolder = await outputFolderHandle.getDirectoryHandle(safeName || 'metadata', { create: true });
-      await docFolder.getDirectoryHandle(`${safeName || 'metadata'}_images`, { create: true });
-      const fileHandle = await docFolder.getFileHandle(`${safeName || 'metadata'}_content.json`, { create: true });
+      const folderName = safeName || 'metadata';
+      const docFolder = await outputFolderHandle.getDirectoryHandle(folderName, { create: true });
+      await docFolder.getDirectoryHandle(`${folderName}_images`, { create: true });
+      const fileName = `${folderName}_content.json`;
+      const fileHandle = await docFolder.getFileHandle(fileName, { create: true });
       const writable = await fileHandle.createWritable();
       await writable.write(new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
       await writable.close();
 
-      setValidationMessage(`Saved folder: ${outputFolderName}/${safeName || 'metadata'}`);
-      window.setTimeout(() => setValidationMessage(null), 3200);
+      showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName}`);
     } catch (err: any) {
-      setValidationMessage(`Save failed: ${err.message || 'unknown error'}`);
-      window.setTimeout(() => setValidationMessage(null), 3200);
+      showExportFeedback('error', `Export failed: ${err.message || 'unknown error'}`, 4000);
     }
   };
 
@@ -180,8 +211,7 @@ const App = () => {
     };
 
     if (!pickerWindow.showDirectoryPicker) {
-      setValidationMessage('Folder picker is not supported in this browser. Use a Chromium-based browser.');
-      window.setTimeout(() => setValidationMessage(null), 3200);
+      showExportFeedback('error', 'Folder picker is unsupported in this browser. Use a Chromium-based browser.', 4200);
       return;
     }
 
@@ -193,17 +223,16 @@ const App = () => {
       });
       setOutputFolderHandle(handle);
       setOutputFolderName(handle?.name || 'Selected folder');
-      setValidationMessage(null);
+      showExportFeedback('info', `Output folder selected: ${handle?.name || 'Selected folder'}`);
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         return;
       }
       if (err?.name === 'SecurityError' || err?.name === 'NotAllowedError') {
-        setValidationMessage('This folder is blocked by the browser. Choose a normal user folder (e.g. Documents/pdf-outputs).');
-        window.setTimeout(() => setValidationMessage(null), 3600);
+        showExportFeedback('error', 'This folder is blocked. Pick a normal user folder like Documents/pdf-outputs.', 4200);
         return;
       }
-      // User canceled folder selection.
+      showExportFeedback('error', `Could not select folder: ${err?.message || 'unknown error'}`, 4200);
     }
   };
 
@@ -342,6 +371,18 @@ const App = () => {
           {/* JSON editor sidebar */}
           <div className="w-96 flex flex-col gap-6 sticky top-6">
             <div className="bg-zinc-900 p-8 rounded-3xl border border-zinc-800 shadow-xl">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div className="text-xs text-zinc-500 truncate" title={sourceFilename}>
+                  PDF: <span className="text-zinc-300">{sourceFilename}</span>
+                </div>
+                <button
+                  onClick={resetWorkflow}
+                  className="px-3 py-2 text-xs rounded-xl bg-rose-900/50 border border-rose-700/80 hover:bg-rose-800/60 text-rose-100 transition-colors"
+                >
+                  Cancel and choose another PDF
+                </button>
+              </div>
+
               <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
                 <Braces className="w-5 h-5 text-blue-500" /> Metadata Editor (JSON)
               </h2>
@@ -382,40 +423,71 @@ const App = () => {
                 onClick={formatJson}
                 className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
               >
-                <CheckCircle2 className={`w-4 h-4 ${validationMessage ? 'text-emerald-400' : 'text-zinc-400'}`} />
-                {validationMessage ? 'Validated' : 'Validate and Format JSON'}
+                <CheckCircle2 className="w-4 h-4 text-zinc-400" />
+                Validate and Format JSON
               </button>
 
-              {validationMessage && (
-                <div className="mt-3 text-xs text-emerald-300 bg-emerald-950/40 border border-emerald-900 p-3 rounded-xl">
-                  {validationMessage}
+              {editorFeedback && (
+                <div
+                  className={`mt-3 text-xs p-3 rounded-xl border ${
+                    editorFeedback.type === 'error'
+                      ? 'text-red-200 bg-red-950/40 border-red-900'
+                      : editorFeedback.type === 'success'
+                      ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+                      : 'text-sky-200 bg-sky-950/40 border-sky-900'
+                  }`}
+                >
+                  {editorFeedback.message}
                 </div>
               )}
             </div>
 
             <div className="flex flex-col gap-3">
+              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4">
+                <div className="text-xs text-zinc-500 mb-2">Step 1</div>
+                <button
+                  onClick={chooseOutputFolder}
+                  className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+                >
+                  <FolderOpen className="w-4 h-4" /> Choose Output Folder
+                </button>
+                <div
+                  className={`mt-3 text-xs rounded-xl px-3 py-2 border ${
+                    outputFolderHandle
+                      ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900'
+                      : 'text-zinc-400 bg-zinc-950/40 border-zinc-700'
+                  }`}
+                >
+                  {outputFolderHandle ? `Selected: ${outputFolderName}` : 'No folder selected yet'}
+                </div>
+              </div>
+
               <button
                 onClick={exportJson}
-                disabled={loading || !parsedData}
+                disabled={loading || !parsedData || !outputFolderHandle}
                 className="w-full py-5 bg-white text-black rounded-3xl font-black text-lg hover:bg-zinc-200 transition-all disabled:bg-zinc-800 flex items-center justify-center gap-3"
               >
-                {loading ? <Loader2 className="animate-spin" /> : 'EXPORT JSON'}
+                {loading ? <Loader2 className="animate-spin" /> : <Download className="w-5 h-5" />}
+                Step 2: Export JSON
               </button>
 
-              <button
-                onClick={chooseOutputFolder}
-                className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all"
-              >
-                Choose Output Folder
-              </button>
-
-              <div className="w-full bg-zinc-900 border border-zinc-800 rounded-2xl px-3 py-2 text-xs text-zinc-300">
-                {outputFolderName}
+              <div className="text-xs text-zinc-400 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
+                Export creates <code>{'{nome_do_pdf}'}</code> with <code>{'{nome_do_pdf}'}_content.json</code> and <code>{'{nome_do_pdf}'}_images</code>.
               </div>
 
-              <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
-                Tip: choose a user folder like <code>Documents/pdf-outputs</code>, not system/root folders.
-              </div>
+              {exportFeedback && (
+                <div
+                  className={`text-xs p-3 rounded-xl border ${
+                    exportFeedback.type === 'error'
+                      ? 'text-red-200 bg-red-950/40 border-red-900'
+                      : exportFeedback.type === 'success'
+                      ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+                      : 'text-sky-200 bg-sky-950/40 border-sky-900'
+                  }`}
+                >
+                  {exportFeedback.message}
+                </div>
+              )}
 
               <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
                 Blocks in preview: {previewBlocks.length} | Pages: {numPages || 1}
