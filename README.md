@@ -27,6 +27,8 @@ ML dependencies in `backend/`:
 - `requirements-ml.txt`
 - includes the required stack for the active processors in this release
 
+Note: `backend/requirements.txt` pins `PyMuPDF==1.26.7` to keep compatibility with `pdf2data` and avoid recent SWIG deprecation-warning noise seen with older versions.
+
 If the virtual environment already exists, just activate it:
 
 ```bash
@@ -80,4 +82,34 @@ Terminal B (frontend):
 cd frontend
 npm install
 npm run dev
+```
+
+## 6. Backend tests
+
+With the backend virtual environment active:
+
+```bash
+cd backend
+./venv/bin/python -m pytest -q
+```
+
+Run only unit tests:
+
+```bash
+cd backend
+./venv/bin/python -m pytest -q -m unit
+```
+
+Run only integration tests:
+
+```bash
+cd backend
+./venv/bin/python -m pytest -q -m integration
+```
+
+ML tests are skipped by default. To include tests marked with `ml`:
+
+```bash
+cd backend
+./venv/bin/python -m pytest -q --run-ml
 ```

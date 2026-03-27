@@ -121,13 +121,53 @@ class SaveEditedPayload(BaseModel):
     document_name: str | None = None
 
 
+PROCESSOR_CATALOG: list[dict[str, Any]] = [
+    {
+        "alias": "pdf2data",
+        "label": "PDF2Data",
+        "pipeline": "NotDefined",
+        "enabled": True,
+        "reason": None,
+    },
+    {
+        "alias": "mineru",
+        "label": "MinerU",
+        "pipeline": "MinerU",
+        "enabled": True,
+        "reason": None,
+    },
+    {
+        "alias": "docling",
+        "label": "Docling",
+        "pipeline": "Docling",
+        "enabled": True,
+        "reason": None,
+    },
+    {
+        "alias": "paddleppstructure",
+        "label": "Paddle PPStructure",
+        "pipeline": "PaddlePPStructure",
+        "enabled": False,
+        "reason": "Temporarily disabled in this build.",
+    },
+    {
+        "alias": "paddlevl",
+        "label": "Paddle VL",
+        "pipeline": "PaddleVL",
+        "enabled": False,
+        "reason": "Temporarily disabled in this build.",
+    },
+    {
+        "alias": "mineruvl",
+        "label": "MinerU VL",
+        "pipeline": "MinerUVL",
+        "enabled": False,
+        "reason": "Temporarily disabled in this build.",
+    },
+]
+
 FRIENDLY_PROCESSOR_ALIASES: dict[str, str] = {
-    "pdf2data": "NotDefined",
-    "mineru": "MinerU",
-    "docling": "Docling",
-    "paddleppstructure": "PaddlePPStructure",
-    "paddlevl": "PaddleVL",
-    "mineruvl": "MinerUVL",
+    item["alias"]: str(item["pipeline"]) for item in PROCESSOR_CATALOG
 }
 
 
@@ -489,6 +529,26 @@ def _extract_with_pipeline(input_tmp: str, output_tmp: str, processor_alias: str
         )
     else:
         raise RuntimeError(f"Unsupported pipeline: {pipeline_name}")
+
+
+@app.get("/api/processors")
+async def list_processors():
+    default_processor = next(
+        (item["alias"] for item in PROCESSOR_CATALOG if item.get("enabled")),
+        PROCESSOR_CATALOG[0]["alias"],
+    )
+    return {
+        "default_processor": default_processor,
+        "processors": [
+            {
+                "alias": item["alias"],
+                "label": item["label"],
+                "enabled": bool(item.get("enabled", False)),
+                "reason": item.get("reason"),
+            }
+            for item in PROCESSOR_CATALOG
+        ],
+    }
 
 @app.post("/api/upload")
 async def upload_and_process(file: UploadFile = File(...), processor: str = Form("pdf2data")):

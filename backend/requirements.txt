@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 python-multipart
-PyMuPDF
+PyMuPDF==1.26.7
 pdf2data-tools
 nltk
+pytest

@@ -9,7 +9,21 @@ import 'react-pdf/dist/Page/TextLayer.css';
 
 const API_BASE = 'http://localhost:8000';
 
-type ProcessorAlias = 'pdf2data' | 'mineru' | 'docling' | 'paddleppstructure' | 'paddlevl' | 'mineruvl';
+type ProcessorOption = {
+  alias: string;
+  label: string;
+  enabled: boolean;
+  reason?: string | null;
+};
+
+const DEFAULT_PROCESSORS: ProcessorOption[] = [
+  { alias: 'pdf2data', label: 'PDF2Data', enabled: true },
+  { alias: 'mineru', label: 'MinerU', enabled: true },
+  { alias: 'docling', label: 'Docling', enabled: true },
+  { alias: 'paddleppstructure', label: 'Paddle PPStructure', enabled: false, reason: 'Temporarily disabled in this build.' },
+  { alias: 'paddlevl', label: 'Paddle VL', enabled: false, reason: 'Temporarily disabled in this build.' },
+  { alias: 'mineruvl', label: 'MinerU VL', enabled: false, reason: 'Temporarily disabled in this build.' },
+];
 
 const buildAssetUrl = (docId: string, assetPath: string) => {
   const encodedDocId = encodeURIComponent(docId);
@@ -49,7 +63,9 @@ const App = () => {
   const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [processor, setProcessor] = useState<ProcessorAlias>('pdf2data');
+  const [processor, setProcessor] = useState<string>('pdf2data');
+  const [processorOptions, setProcessorOptions] = useState<ProcessorOption[]>(DEFAULT_PROCESSORS);
+  const [processorLoadWarning, setProcessorLoadWarning] = useState<string | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
@@ -104,6 +120,60 @@ const App = () => {
 
   const parsedData = parsedState?.data ?? null;
   const jsonError = parsedState?.error ?? null;
+  const disabledProcessors = useMemo(() => processorOptions.filter((item) => !item.enabled), [processorOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProcessors = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/processors`);
+        if (!response.ok) {
+          throw new Error(`capabilities request failed (${response.status})`);
+        }
+
+        const payload = await response.json();
+        const apiList = Array.isArray(payload?.processors) ? payload.processors : [];
+        const normalized: ProcessorOption[] = apiList
+          .filter((item: any) => typeof item?.alias === 'string' && typeof item?.label === 'string')
+          .map((item: any) => ({
+            alias: item.alias,
+            label: item.label,
+            enabled: Boolean(item.enabled),
+            reason: typeof item.reason === 'string' ? item.reason : null,
+          }));
+
+        if (!normalized.length) {
+          throw new Error('empty capabilities payload');
+        }
+
+        if (cancelled) return;
+
+        setProcessorOptions(normalized);
+        setProcessorLoadWarning(null);
+
+        const enabledAliases = new Set(normalized.filter((item) => item.enabled).map((item) => item.alias));
+        const defaultFromApi =
+          typeof payload?.default_processor === 'string' && enabledAliases.has(payload.default_processor)
+            ? payload.default_processor
+            : normalized.find((item) => item.enabled)?.alias ?? normalized[0].alias;
+
+        setProcessor((current) => (enabledAliases.has(current) ? current : defaultFromApi));
+      } catch (err) {
+        console.error(err);
+        if (cancelled) return;
+
+        setProcessorOptions(DEFAULT_PROCESSORS);
+        setProcessorLoadWarning('Could not load processors from backend. Using local fallback list.');
+      }
+    };
+
+    loadProcessors();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedIndex === null || !Array.isArray(parsedData?.blocks)) {
@@ -391,19 +461,24 @@ const App = () => {
             <label className="block text-xs text-zinc-400 mb-2">Processor</label>
             <select
               value={processor}
-              onChange={(e) => setProcessor(e.target.value as ProcessorAlias)}
+              onChange={(e) => setProcessor(e.target.value)}
               className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
             >
-              <option value="pdf2data">PDF2Data</option>
-              <option value="mineru">MinerU</option>
-              <option value="docling">Docling</option>
-              <option value="paddleppstructure" disabled>Paddle PPStructure (temporarily disabled)</option>
-              <option value="paddlevl" disabled>Paddle VL (temporarily disabled)</option>
-              <option value="mineruvl" disabled>MinerU VL (temporarily disabled)</option>
+              {processorOptions.map((item) => (
+                <option key={item.alias} value={item.alias} disabled={!item.enabled}>
+                  {item.label}
+                  {!item.enabled ? ' (temporarily disabled)' : ''}
+                </option>
+              ))}
             </select>
-            <p className="mt-2 text-xs text-amber-400/90">
-              Paddle PPStructure, Paddle VL and MinerU VL are temporarily disabled.
-            </p>
+            {disabledProcessors.length > 0 && (
+              <p className="mt-2 text-xs text-amber-400/90">
+                Disabled: {disabledProcessors.map((item) => item.label).join(', ')}.
+              </p>
+            )}
+            {processorLoadWarning && (
+              <p className="mt-2 text-xs text-orange-400/90">{processorLoadWarning}</p>
+            )}
           </div>
 
           {loading && (
