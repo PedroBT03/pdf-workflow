@@ -27,8 +27,6 @@ ML dependencies in `backend/`:
 - `requirements-ml.txt`
 - includes the required stack for the active processors in this release
 
-Note: `backend/requirements.txt` pins `PyMuPDF==1.26.7` to keep compatibility with `pdf2data` and avoid recent SWIG deprecation-warning noise seen with older versions.
-
 If the virtual environment already exists, just activate it:
 
 ```bash
