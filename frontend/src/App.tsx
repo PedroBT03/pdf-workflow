@@ -9,6 +9,8 @@ import 'react-pdf/dist/Page/TextLayer.css';
 
 const API_BASE = 'http://localhost:8000';
 
+type ProcessorAlias = 'pdf2data' | 'mineru' | 'docling' | 'paddleppstructure' | 'paddlevl' | 'mineruvl';
+
 const buildAssetUrl = (docId: string, assetPath: string) => {
   const encodedDocId = encodeURIComponent(docId);
   const encodedPath = assetPath
@@ -47,7 +49,7 @@ const App = () => {
   const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [processor, setProcessor] = useState<'pdf2data' | 'mineru'>('pdf2data');
+  const [processor, setProcessor] = useState<ProcessorAlias>('pdf2data');
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
@@ -82,6 +84,12 @@ const App = () => {
     setSourceFilename('metadata');
     setOutputFolderHandle(null);
     setOutputFolderName('No folder selected');
+  };
+
+  const confirmAndResetWorkflow = () => {
+    const shouldReset = window.confirm('Discard current edits and choose another PDF?');
+    if (!shouldReset) return;
+    resetWorkflow();
   };
 
   const parsedState = useMemo(() => {
@@ -383,12 +391,19 @@ const App = () => {
             <label className="block text-xs text-zinc-400 mb-2">Processor</label>
             <select
               value={processor}
-              onChange={(e) => setProcessor(e.target.value as 'pdf2data' | 'mineru')}
+              onChange={(e) => setProcessor(e.target.value as ProcessorAlias)}
               className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
             >
               <option value="pdf2data">PDF2Data</option>
               <option value="mineru">MinerU</option>
+              <option value="docling">Docling</option>
+              <option value="paddleppstructure" disabled>Paddle PPStructure (temporarily disabled)</option>
+              <option value="paddlevl" disabled>Paddle VL (temporarily disabled)</option>
+              <option value="mineruvl" disabled>MinerU VL (temporarily disabled)</option>
             </select>
+            <p className="mt-2 text-xs text-amber-400/90">
+              Paddle PPStructure, Paddle VL and MinerU VL are temporarily disabled.
+            </p>
           </div>
 
           {loading && (
@@ -486,7 +501,7 @@ const App = () => {
                   PDF: <span className="text-zinc-300">{sourceFilename}</span>
                 </div>
                 <button
-                  onClick={resetWorkflow}
+                  onClick={confirmAndResetWorkflow}
                   className="px-3 py-2 text-xs rounded-xl bg-rose-900/50 border border-rose-700/80 hover:bg-rose-800/60 text-rose-100 transition-colors"
                 >
                   Cancel and choose another PDF

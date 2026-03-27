@@ -1,4 +1,6 @@
-torch
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
 tensorflow
 numpy
 opencv-python
@@ -12,3 +14,4 @@ accelerate
 ftfy
 dill
 omegaconf
+docling

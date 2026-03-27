@@ -1,15 +1,15 @@
 # PDF Workflow
 
-Projeto com backend em FastAPI e frontend em React + Vite.
+Project with a FastAPI backend and a React + Vite frontend.
 
-## Requisitos
+## Requirements
 
-- Python 3.10+ (recomendado)
-- Node.js 18+ e npm
+- Python 3.10+ (recommended: 3.12 for ML)
+- Node.js 18+ and npm
 
-## 1. Backend: ambiente virtual e dependencias
+## 1. Backend: virtual environment and dependencies
 
-No terminal, a partir da raiz do projeto:
+From the terminal, starting at the project root:
 
 ```bash
 cd backend
@@ -18,48 +18,53 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# Opcional: necessario para usar /api/upload com deteccao IA
+# Optional: required to use /api/upload with AI extraction
 python -m pip install -r requirements-ml.txt
 ```
 
-Se o ambiente virtual ja existir, basta entrar com:
+ML dependencies in `backend/`:
+
+- `requirements-ml.txt`
+- includes the required stack for the active processors in this release
+
+If the virtual environment already exists, just activate it:
 
 ```bash
 cd backend
 source venv/bin/activate
 ```
 
-## 2. Correr o backend
+## 2. Run the backend
 
-Com o ambiente virtual ativo:
+With the virtual environment active:
 
 ```bash
 cd backend
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-API disponivel em `http://localhost:8000`.
+API available at `http://localhost:8000`.
 
-## 3. Frontend: instalar dependencias
+## 3. Frontend: install dependencies
 
-Noutro terminal, a partir da raiz do projeto:
+In another terminal, starting at the project root:
 
 ```bash
 cd frontend
 npm install
 ```
 
-## 4. Correr o frontend
+## 4. Run the frontend
 
-Ainda no `frontend`:
+Still inside `frontend`:
 
 ```bash
 npm run dev
 ```
 
-App disponivel em `http://localhost:5173` (porta padrao do Vite).
+App available at `http://localhost:5173` (default Vite port).
 
-## 5. Fluxo completo rapido (2 terminais)
+## 5. Quick full flow (2 terminals)
 
 Terminal A (backend):
 
@@ -75,49 +80,4 @@ Terminal B (frontend):
 cd frontend
 npm install
 npm run dev
-```
-
-## Nota sobre `pdf2data`
-
-O backend tenta importar `pdf2data` em `backend/main.py`. Se esse modulo nao estiver instalado/disponivel no teu ambiente, o endpoint de upload pode falhar. Garante que a libraria/modulo `pdf2data` esta acessivel no mesmo ambiente Python.
-
-Para usar o endpoint `/api/upload` com o stack de ML completo, instala tambem:
-
-```bash
-cd backend
-source venv/bin/activate
-python -m pip install -r requirements-ml.txt
-```
-
-To use `processor=mineru`, make sure the MinerU CLI is installed in the same environment:
-
-```bash
-cd backend
-source venv/bin/activate
-python -m pip install -r requirements-ml.txt
-command -v mineru
-```
-
-`requirements-ml.txt` includes MinerU runtime dependencies such as `ultralytics` and `accelerate`.
-
-Note: this backend forces MinerU to run with `-b pipeline -d cpu` to avoid CUDA out-of-memory failures on low-VRAM GPUs.
-It also sets `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` for the MinerU subprocess to keep compatibility with checkpoints that fail under PyTorch's newer `weights_only=True` default.
-
-## Resolucao de problemas
-
-Se aparecer este erro ao usar `pip`:
-
-```bash
-bash: .../venv/bin/pip: cannot execute: required file not found
-```
-
-Significa que o `venv` ficou inconsistente (muito comum apos mover/renomear a pasta do projeto). Recria o ambiente:
-
-```bash
-cd backend
-rm -rf venv
-python3 -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 ```

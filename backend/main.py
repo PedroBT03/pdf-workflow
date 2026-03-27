@@ -4,9 +4,11 @@ import traceback
 import tempfile
 import json
 import importlib.util
-import subprocess
 import os
+import sys
+import subprocess
 from pathlib import Path
+from typing import Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -119,103 +121,135 @@ class SaveEditedPayload(BaseModel):
     document_name: str | None = None
 
 
-def _extract_with_pdf2data(file_path: Path, input_tmp: str, output_tmp: str) -> list[dict]:
-    from pdf2data.pdf2data_pipeline import PDF2Data
+FRIENDLY_PROCESSOR_ALIASES: dict[str, str] = {
+    "pdf2data": "NotDefined",
+    "mineru": "MinerU",
+    "docling": "Docling",
+    "paddleppstructure": "PaddlePPStructure",
+    "paddlevl": "PaddleVL",
+    "mineruvl": "MinerUVL",
+}
 
-    pipeline = PDF2Data(
-        layout_model="DocLayout-YOLO-DocStructBench",
-        layout_model_threshold=0.5,
-        table_model=None,
-        table_model_threshold=0.5,
-        device="cpu",
-        input_folder=input_tmp,
-        output_folder=output_tmp,
-        extract_text=True,
-        extract_tables=True,
-        extract_figures=True,
-        extract_equations=True,
-        extract_references=False,
-    )
-    pipeline.pdf_transform()
 
-    content_files = sorted(Path(output_tmp).rglob("*_content.json"))
-    if not content_files:
+def _require_modules(module_names: list[str], pipeline_name: str) -> None:
+    missing = [name for name in module_names if importlib.util.find_spec(name) is None]
+    if missing:
         raise RuntimeError(
-            "PDF2Data did not generate any *_content.json output. Verify pdf2data-tools installation/version."
+            f"Missing dependency for {pipeline_name}: {', '.join(missing)}. Install requirements-ml.txt."
         )
 
-    with open(content_files[0], "r", encoding="utf-8") as f:
-        parsed = json.load(f)
 
-    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
-    blocks_data: list[dict] = []
+def _require_torchvision_runtime() -> None:
+    try:
+        import torch  # noqa: F401
+        import torchvision  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not import torch/torchvision runtime. Install/update requirements-ml.txt."
+        ) from exc
+
+    try:
+        from torchvision.ops import nms  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "Detected torch/torchvision binary mismatch (missing torchvision::nms). "
+            "Reinstall torch, torchvision and torchaudio from the same source (CPU or same CUDA build)."
+        ) from exc
+
+
+def _safe_int(value: Any, default: int = 1) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float = 11.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
+    normalized: list[dict] = []
     for idx, block in enumerate(raw_blocks):
+        if not isinstance(block, dict):
+            continue
+
         box = block.get("box")
         if not isinstance(box, list) or len(box) != 4:
             continue
 
-        block_type = str(block.get("type") or "")
+        block_type = str(block.get("type") or block.get("layout_type") or "")
         content = block.get("content")
-        if not content:
+        if content in (None, ""):
             content = block.get("legend") or block.get("caption") or block_type
 
-        normalized_block = {
-            **block,
-            "id": idx,
-            "page": int(block.get("page", 1)),
-            "box": [float(c) for c in box],
-            "originalBox": [float(c) for c in box],
-            "content": str(content or ""),
-            "type": _normalize_layout_label(block_type),
-            "layout_type": block_type or _normalize_layout_label(block_type),
-            "font_size": float(block.get("font_size", 11.0)),
-            "color": block.get("color", (0, 0, 0)),
-            "source": "pdf2data",
-        }
-        blocks_data.append(normalized_block)
-
-    print(f"DEBUG: PDF2Data normalized {len(blocks_data)} blocks from *_content.json.")
-    return blocks_data
-
-
-def _extract_with_mineru(input_tmp: str, output_tmp: str) -> list[dict]:
-    if importlib.util.find_spec("ultralytics") is None:
-        raise RuntimeError(
-            "Missing dependency for MinerU: 'ultralytics'. Install requirements-ml.txt."
+        normalized.append(
+            {
+                **block,
+                "id": idx,
+                "page": _safe_int(block.get("page", 1), 1),
+                "box": [float(c) for c in box],
+                "originalBox": [float(c) for c in box],
+                "content": str(content or ""),
+                "type": _normalize_layout_label(block_type),
+                "layout_type": str(block.get("layout_type") or block_type or _normalize_layout_label(block_type)),
+                "font_size": _safe_float(block.get("font_size", 11.0), 11.0),
+                "color": block.get("color", (0, 0, 0)),
+                "source": source,
+            }
         )
 
-    if importlib.util.find_spec("accelerate") is None:
-        raise RuntimeError(
-            "Missing dependency for MinerU: 'accelerate'. Install requirements-ml.txt."
-        )
+    return normalized
 
-    if importlib.util.find_spec("ftfy") is None:
-        raise RuntimeError(
-            "Missing dependency for MinerU: 'ftfy'. Install requirements-ml.txt."
-        )
 
-    if importlib.util.find_spec("dill") is None:
-        raise RuntimeError(
-            "Missing dependency for MinerU: 'dill'. Install requirements-ml.txt."
-        )
+def _find_first_content_json(output_tmp: str) -> Path:
+    content_files = sorted(Path(output_tmp).rglob("*_content.json"))
+    if not content_files:
+        raise RuntimeError("Pipeline finished without generating *_content.json output.")
+    return content_files[0]
 
-    if importlib.util.find_spec("omegaconf") is None:
-        raise RuntimeError(
-            "Missing dependency for MinerU: 'omegaconf'. Install requirements-ml.txt."
-        )
 
+def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     mineru_cli = shutil.which("mineru") or shutil.which("magic-pdf")
     if mineru_cli is None:
-        raise RuntimeError(
-            "MinerU CLI executable not found. Install and configure the 'mineru' command in this environment."
-        )
+        raise RuntimeError("MinerU CLI executable not found in environment PATH.")
 
-    # Force MinerU to run on CPU with pipeline backend for low-memory GPUs.
     mineru_env = os.environ.copy()
-    # Torch >=2.6 defaults to weights_only=True in torch.load, which breaks
-    # some MinerU/doclayout checkpoints. Force legacy-compatible loading.
     mineru_env.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
     mineru_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
+    try:
+        subprocess.run(
+            [
+                mineru_cli,
+                "-p",
+                input_tmp,
+                "-o",
+                output_tmp,
+                "-l",
+                "en",
+                "-b",
+                "pipeline",
+                "-m",
+                "auto",
+                "-d",
+                "cpu",
+            ],
+            check=True,
+            env=mineru_env,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("MinerU CLI execution failed. Check backend logs for details.") from exc
+
+    middle_files = sorted(Path(output_tmp).rglob("*_middle.json"))
+    if not middle_files:
+        raise RuntimeError("MinerU did not generate *_middle.json output.")
+
+    with open(middle_files[0], "r", encoding="utf-8") as f:
+        middle_data = json.load(f)
 
     def _span_text(span: dict) -> str:
         return str(span.get("content") or "").strip()
@@ -240,44 +274,6 @@ def _extract_with_mineru(input_tmp: str, output_tmp: str) -> list[dict]:
             if text:
                 sub_parts.append(text)
         return " ".join(sub_parts).strip()
-
-    try:
-        subprocess.run(
-            [
-                mineru_cli,
-                "-p",
-                input_tmp,
-                "-o",
-                output_tmp,
-                "-l",
-                "en",
-                "-b",
-                "pipeline",
-                "-m",
-                "auto",
-                "-d",
-                "cpu",
-            ],
-            check=True,
-            env=mineru_env,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "MinerU execution failed. Check MinerU logs above (for example model download or runtime dependency errors)."
-        ) from e
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            "MinerU failed to produce expected output files. Check MinerU logs above for the first dependency/runtime error."
-        ) from e
-
-    middle_files = sorted(Path(output_tmp).rglob("*_middle.json"))
-    if not middle_files:
-        raise RuntimeError(
-            "MinerU completed but did not generate any *_middle.json output. Check MinerU logs above for the first dependency/runtime error."
-        )
-
-    with open(middle_files[0], "r", encoding="utf-8") as f:
-        middle_data = json.load(f)
 
     pdf_info = middle_data.get("pdf_info", []) if isinstance(middle_data, dict) else []
     normalized: list[dict] = []
@@ -308,8 +304,191 @@ def _extract_with_mineru(input_tmp: str, output_tmp: str) -> list[dict]:
             )
             next_id += 1
 
-    print(f"DEBUG: MinerU normalized {len(normalized)} blocks.")
-    return normalized
+    return _normalize_raw_blocks(normalized, source="mineru")
+
+
+def _extract_with_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+    # Always run in the same interpreter as the API process to avoid venv/path mismatches.
+    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
+    
+    layout_models = ["PP-DocLayout-L", "DocLayout-YOLO-DocStructBench"]
+    last_error: Exception | None = None
+
+    for layout_model in layout_models:
+        cmd = [
+            *base_cmd,
+            "--pipeline",
+            "NotDefined",
+            "--layout_model",
+            layout_model,
+            "--layout_model_threshold",
+            "0.7",
+            "--table_model_threshold",
+            "0.5",
+            "--device",
+            "cpu",
+        ]
+
+        child_env = os.environ.copy()
+        child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+        child_env.setdefault("OMP_NUM_THREADS", "1")
+        child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                timeout=900,
+                env=child_env,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                stderr_text = (result.stderr or "")
+                try:
+                    _find_first_content_json(output_tmp)
+                    has_content = True
+                except Exception:
+                    has_content = False
+
+                if not (has_content and "anystyle" in stderr_text.lower()):
+                    raise subprocess.CalledProcessError(
+                        returncode=result.returncode,
+                        cmd=cmd,
+                        output=result.stdout,
+                        stderr=result.stderr,
+                    )
+            last_error = None
+            break
+        except subprocess.TimeoutExpired as exc:
+            last_error = exc
+            continue
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        if isinstance(last_error, subprocess.TimeoutExpired):
+            raise RuntimeError(
+                "PDF2Data timed out. The process likely got stuck in model/runtime initialization."
+            ) from last_error
+
+        if isinstance(last_error, subprocess.CalledProcessError) and last_error.returncode == -11:
+            raise RuntimeError(
+                "PDF2Data crashed with SIGSEGV (native runtime fault) even after fallback. "
+                "Use processor='mineru' or 'docling' on this environment."
+            ) from last_error
+
+        if isinstance(last_error, subprocess.CalledProcessError):
+            stderr_text = (last_error.stderr or "").strip()
+            stdout_text = (last_error.output or "").strip()
+            combined = "\n".join(part for part in [stdout_text, stderr_text] if part)
+            tail_lines = [line for line in combined.splitlines() if line.strip()][-25:]
+            tail = "\n".join(tail_lines)
+            raise RuntimeError(
+                "PDF2Data execution failed in isolated subprocess. "
+                f"Exit code: {last_error.returncode}. Last logs:\n{tail}"
+            ) from last_error
+
+        raise RuntimeError(
+            "PDF2Data execution failed in isolated subprocess. Check backend logs for native runtime errors."
+        ) from last_error
+
+    content_path = _find_first_content_json(output_tmp)
+    with open(content_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+
+    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    return _normalize_raw_blocks(raw_blocks, source="pdf2data")
+
+
+def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+    # Always run in the same interpreter as the API process to avoid venv/path mismatches.
+    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
+
+    cmd = [
+        *base_cmd,
+        "--pipeline",
+        "Docling",
+    ]
+
+    child_env = os.environ.copy()
+    child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+    child_env.setdefault("OMP_NUM_THREADS", "1")
+    # Force CPU path for torch/docling models.
+    child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            timeout=900,
+            env=child_env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Docling timed out during conversion.") from exc
+
+    if result.returncode != 0:
+        stderr_text = (result.stderr or "")
+        try:
+            _find_first_content_json(output_tmp)
+            has_content = True
+        except Exception:
+            has_content = False
+
+        if has_content and "anystyle" in stderr_text.lower():
+            pass
+        elif "cudnn_status_not_initialized" in stderr_text.lower() or "cudnn" in stderr_text.lower():
+            raise RuntimeError(
+                "Docling failed due to CUDA/cuDNN runtime initialization. "
+                "This environment should run Docling in CPU mode only; try again or use processor='mineru'/'pdf2data'."
+            )
+        else:
+            raise RuntimeError("Docling execution failed in isolated subprocess.")
+
+    content_path = _find_first_content_json(output_tmp)
+    with open(content_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+
+    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    return _normalize_raw_blocks(raw_blocks, source="docling")
+
+
+def _extract_with_pipeline(input_tmp: str, output_tmp: str, processor_alias: str) -> list[dict]:
+    pipeline_name = FRIENDLY_PROCESSOR_ALIASES[processor_alias]
+
+    if pipeline_name == "NotDefined":
+        _require_modules(["pdf2data", "paddleocr"], "PDF2Data")
+        _require_torchvision_runtime()
+        # Run pdf2data in a subprocess so native runtime issues cannot kill the API process.
+        return _extract_with_pdf2data_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+    elif pipeline_name == "MinerU":
+        _require_modules(["pdf2data", "mineru", "ultralytics", "accelerate", "ftfy", "dill", "omegaconf"], "MinerU")
+        # Use MinerU CLI path directly; more stable across MinerU output layout changes.
+        return _extract_with_mineru_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+    elif pipeline_name == "Docling":
+        _require_modules(["pdf2data", "docling"], "Docling")
+        return _extract_with_docling_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+    elif pipeline_name in {"PaddlePPStructure", "PaddleVL"}:
+        raise RuntimeError(
+            "Processor temporarily disabled: paddleppstructure/paddlevl are not enabled in this build."
+        )
+    elif pipeline_name == "MinerUVL":
+        raise RuntimeError(
+            "Processor temporarily disabled: mineruvl is not enabled in this build."
+        )
+    else:
+        raise RuntimeError(f"Unsupported pipeline: {pipeline_name}")
 
 @app.post("/api/upload")
 async def upload_and_process(file: UploadFile = File(...), processor: str = Form("pdf2data")):
@@ -327,8 +506,9 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
 
     file_id = str(uuid.uuid4())
     processor_name = processor.strip().lower()
-    if processor_name not in {"pdf2data", "mineru"}:
-        raise HTTPException(status_code=400, detail="Invalid processor. Use 'pdf2data' or 'mineru'.")
+    if processor_name not in FRIENDLY_PROCESSOR_ALIASES:
+        allowed = ", ".join(sorted(FRIENDLY_PROCESSOR_ALIASES.keys()))
+        raise HTTPException(status_code=400, detail=f"Invalid processor. Use one of: {allowed}.")
 
     try:
         with tempfile.TemporaryDirectory(prefix="pdfwf_in_") as input_tmp, tempfile.TemporaryDirectory(
@@ -340,10 +520,11 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-            if processor_name == "pdf2data":
-                blocks_data = _extract_with_pdf2data(file_path=file_path, input_tmp=input_tmp, output_tmp=output_tmp)
-            else:
-                blocks_data = _extract_with_mineru(input_tmp=input_tmp, output_tmp=output_tmp)
+            blocks_data = _extract_with_pipeline(
+                input_tmp=input_tmp,
+                output_tmp=output_tmp,
+                processor_alias=processor_name,
+            )
 
             copied_assets = _persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
 
@@ -361,17 +542,16 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
                     }
                 )
 
-            if processor_name == "pdf2data":
-                # Backfill missing text content from PDF for any empty text-like block.
-                for block in blocks_data:
-                    if str(block.get("content") or "").strip():
-                        continue
-                    page_number = int(block.get("page", 1))
-                    if page_number < 1 or page_number > doc.page_count:
-                        continue
-                    page = doc[page_number - 1]
-                    rect = fitz.Rect(block["box"])
-                    block["content"] = page.get_textbox(rect).strip() or " "
+            # Backfill missing text content from PDF for any empty text-like block.
+            for block in blocks_data:
+                if str(block.get("content") or "").strip():
+                    continue
+                page_number = int(block.get("page", 1))
+                if page_number < 1 or page_number > doc.page_count:
+                    continue
+                page = doc[page_number - 1]
+                rect = fitz.Rect(block["box"])
+                block["content"] = page.get_textbox(rect).strip() or " "
 
             pdf_size = (
                 {"width": page_sizes[0]["width"], "height": page_sizes[0]["height"]}
