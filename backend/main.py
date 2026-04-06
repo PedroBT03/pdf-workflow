@@ -170,6 +170,12 @@ FRIENDLY_PROCESSOR_ALIASES: dict[str, str] = {
     item["alias"]: str(item["pipeline"]) for item in PROCESSOR_CATALOG
 }
 
+PDF2DATA_LAYOUT_AUTO = "auto"
+PDF2DATA_LAYOUT_MODELS = {
+    "PP-DocLayout-L",
+    "DocLayout-YOLO-DocStructBench",
+}
+
 
 def _require_modules(module_names: list[str], pipeline_name: str) -> None:
     missing = [name for name in module_names if importlib.util.find_spec(name) is None]
@@ -347,11 +353,19 @@ def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     return _normalize_raw_blocks(normalized, source="mineru")
 
 
-def _extract_with_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+def _extract_with_pdf2data_cli(
+    input_tmp: str,
+    output_tmp: str,
+    layout_models: list[str] | None = None,
+    table_model: str | None = None,
+    layout_model_threshold: str = "0.7",
+    table_model_threshold: str = "0.5",
+) -> list[dict]:
     # Always run in the same interpreter as the API process to avoid venv/path mismatches.
     base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
     
-    layout_models = ["PP-DocLayout-L", "DocLayout-YOLO-DocStructBench"]
+    if layout_models is None:
+        layout_models = ["PP-DocLayout-L", "DocLayout-YOLO-DocStructBench"]
     last_error: Exception | None = None
 
     for layout_model in layout_models:
@@ -362,12 +376,14 @@ def _extract_with_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[dict]:
             "--layout_model",
             layout_model,
             "--layout_model_threshold",
-            "0.7",
+            layout_model_threshold,
             "--table_model_threshold",
-            "0.5",
+            table_model_threshold,
             "--device",
             "cpu",
         ]
+        if table_model:
+            cmd.extend(["--table_model", table_model])
 
         child_env = os.environ.copy()
         child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -505,13 +521,55 @@ def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
 
 
 def _extract_with_pipeline(input_tmp: str, output_tmp: str, processor_alias: str) -> list[dict]:
+    return _extract_with_pipeline_options(
+        input_tmp=input_tmp,
+        output_tmp=output_tmp,
+        processor_alias=processor_alias,
+        pdf2data_layout_model=PDF2DATA_LAYOUT_AUTO,
+        pdf2data_table_model=None,
+    )
+
+
+def _extract_with_pipeline_options(
+    input_tmp: str,
+    output_tmp: str,
+    processor_alias: str,
+    pdf2data_layout_model: str = PDF2DATA_LAYOUT_AUTO,
+    pdf2data_table_model: str | None = None,
+) -> list[dict]:
     pipeline_name = FRIENDLY_PROCESSOR_ALIASES[processor_alias]
 
     if pipeline_name == "NotDefined":
         _require_modules(["pdf2data", "paddleocr"], "PDF2Data")
         _require_torchvision_runtime()
+        requested_layout = (pdf2data_layout_model or PDF2DATA_LAYOUT_AUTO).strip()
+        if requested_layout == PDF2DATA_LAYOUT_AUTO:
+            layout_models = ["PP-DocLayout-L", "DocLayout-YOLO-DocStructBench"]
+        else:
+            if requested_layout not in PDF2DATA_LAYOUT_MODELS:
+                allowed_layouts = ", ".join(sorted(PDF2DATA_LAYOUT_MODELS | {PDF2DATA_LAYOUT_AUTO}))
+                raise RuntimeError(f"Invalid pdf2data layout model: {requested_layout}. Use one of: {allowed_layouts}.")
+            layout_models = [requested_layout]
+
+        requested_table_model = (pdf2data_table_model or "").strip() or None
+        if requested_table_model == "none":
+            requested_table_model = None
+        if requested_table_model == "microsoft/table-transformer-detection":
+            pass
+        elif requested_table_model is not None:
+            raise RuntimeError(
+                "Invalid pdf2data table model. Use 'none' or 'microsoft/table-transformer-detection'."
+            )
+
         # Run pdf2data in a subprocess so native runtime issues cannot kill the API process.
-        return _extract_with_pdf2data_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+        return _extract_with_pdf2data_cli(
+            input_tmp=input_tmp,
+            output_tmp=output_tmp,
+            layout_models=layout_models,
+            table_model=requested_table_model,
+            layout_model_threshold="0.7",
+            table_model_threshold="0.5",
+        )
     elif pipeline_name == "MinerU":
         _require_modules(["pdf2data", "mineru", "ultralytics", "accelerate", "ftfy", "dill", "omegaconf"], "MinerU")
         # Use MinerU CLI path directly; more stable across MinerU output layout changes.
@@ -551,7 +609,12 @@ async def list_processors():
     }
 
 @app.post("/api/upload")
-async def upload_and_process(file: UploadFile = File(...), processor: str = Form("pdf2data")):
+async def upload_and_process(
+    file: UploadFile = File(...),
+    processor: str = Form("pdf2data"),
+    pdf2data_layout_model: str = Form(PDF2DATA_LAYOUT_AUTO),
+    pdf2data_table_model: str = Form("none"),
+):
     try:
         import pdf2data  # noqa: F401
     except ModuleNotFoundError as e:
@@ -580,10 +643,12 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-            blocks_data = _extract_with_pipeline(
+            blocks_data = _extract_with_pipeline_options(
                 input_tmp=input_tmp,
                 output_tmp=output_tmp,
                 processor_alias=processor_name,
+                pdf2data_layout_model=pdf2data_layout_model,
+                pdf2data_table_model=pdf2data_table_model,
             )
 
             copied_assets = _persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
@@ -623,6 +688,10 @@ async def upload_and_process(file: UploadFile = File(...), processor: str = Form
             return {
                 "id": file_id,
                 "processor": processor_name,
+                "processor_options": {
+                    "pdf2data_layout_model": pdf2data_layout_model,
+                    "pdf2data_table_model": pdf2data_table_model,
+                },
                 "blocks": blocks_data,
                 **_build_columnar_fields(blocks_data),
                 "amount": len(blocks_data),

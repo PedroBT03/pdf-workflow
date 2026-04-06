@@ -25,6 +25,17 @@ const DEFAULT_PROCESSORS: ProcessorOption[] = [
   { alias: 'mineruvl', label: 'MinerU VL', enabled: false, reason: 'Temporarily disabled in this build.' },
 ];
 
+const PDF2DATA_LAYOUT_OPTIONS = [
+  { value: 'auto', label: 'Auto (fallback PP-DocLayout-L -> DocLayout-YOLO)' },
+  { value: 'PP-DocLayout-L', label: 'PP-DocLayout-L' },
+  { value: 'DocLayout-YOLO-DocStructBench', label: 'DocLayout-YOLO-DocStructBench' },
+];
+
+const PDF2DATA_TABLE_OPTIONS = [
+  { value: 'none', label: 'None (layout model handles table regions)' },
+  { value: 'microsoft/table-transformer-detection', label: 'microsoft/table-transformer-detection' },
+];
+
 const buildAssetUrl = (docId: string, assetPath: string) => {
   const encodedDocId = encodeURIComponent(docId);
   const encodedPath = assetPath
@@ -64,6 +75,8 @@ const App = () => {
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [processor, setProcessor] = useState<string>('pdf2data');
+  const [pdf2dataLayoutModel, setPdf2dataLayoutModel] = useState<string>('auto');
+  const [pdf2dataTableModel, setPdf2dataTableModel] = useState<string>('none');
   const [processorOptions, setProcessorOptions] = useState<ProcessorOption[]>(DEFAULT_PROCESSORS);
   const [processorLoadWarning, setProcessorLoadWarning] = useState<string | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
@@ -95,6 +108,8 @@ const App = () => {
     setExportFeedback(null);
     setNumPages(0);
     setCurrentPage(1);
+    setPdf2dataLayoutModel('auto');
+    setPdf2dataTableModel('none');
     setPageSizes({});
     setPdfFile(null);
     setSourceFilename('metadata');
@@ -195,6 +210,10 @@ const App = () => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('processor', processor);
+    if (processor === 'pdf2data') {
+      formData.append('pdf2data_layout_model', pdf2dataLayoutModel);
+      formData.append('pdf2data_table_model', pdf2dataTableModel);
+    }
 
     try {
       const response = await fetch(`${API_BASE}/api/upload`, {
@@ -471,13 +490,37 @@ const App = () => {
                 </option>
               ))}
             </select>
-            {disabledProcessors.length > 0 && (
-              <p className="mt-2 text-xs text-amber-400/90">
-                Disabled: {disabledProcessors.map((item) => item.label).join(', ')}.
-              </p>
-            )}
             {processorLoadWarning && (
               <p className="mt-2 text-xs text-orange-400/90">{processorLoadWarning}</p>
+            )}
+
+            {processor === 'pdf2data' && (
+              <div className="mt-4 grid gap-3">
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-2">PDF2Data layout model</label>
+                  <select
+                    value={pdf2dataLayoutModel}
+                    onChange={(e) => setPdf2dataLayoutModel(e.target.value)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                  >
+                    {PDF2DATA_LAYOUT_OPTIONS.map((item) => (
+                      <option key={item.value} value={item.value}>{item.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-2">PDF2Data table model</label>
+                  <select
+                    value={pdf2dataTableModel}
+                    onChange={(e) => setPdf2dataTableModel(e.target.value)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                  >
+                    {PDF2DATA_TABLE_OPTIONS.map((item) => (
+                      <option key={item.value} value={item.value}>{item.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             )}
           </div>
 
