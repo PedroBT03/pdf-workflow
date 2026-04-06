@@ -29,17 +29,6 @@ app.add_middleware(
 )
 
 
-def _normalize_block_type(block: dict) -> str:
-    raw = str(block.get("type") or "").strip().lower()
-    if raw in {"section_header", "paragraph"}:
-        return raw
-    if raw in {"title", "header", "heading"}:
-        return "section_header"
-    if raw in {"table", "figure", "equation"}:
-        return raw.capitalize()
-    return "paragraph"
-
-
 def _normalize_layout_label(raw_label: str) -> str:
     label = raw_label.strip().lower()
     if label in {"text", "paragraph"}:
@@ -55,25 +44,46 @@ def _normalize_layout_label(raw_label: str) -> str:
     return raw_label.strip() or "paragraph"
 
 
-def _build_columnar_fields(blocks: list[dict]) -> dict:
-    text_list: list[str] = []
-    type_list: list[str] = []
-    coordinates_list: list[list[float]] = []
+def _format_as_content_json(data: dict) -> dict:
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    references = data.get("references") if isinstance(data.get("references"), list) else []
+    raw_blocks = data.get("blocks") if isinstance(data.get("blocks"), list) else []
 
-    for block in blocks:
-        content = str(block.get("content") or "")
-        box = block.get("box")
+    formatted_blocks: list[dict] = []
+    for raw in raw_blocks:
+        if not isinstance(raw, dict):
+            continue
+
+        box = raw.get("box")
         if not isinstance(box, list) or len(box) != 4:
             continue
 
-        text_list.append(content)
-        type_list.append(_normalize_block_type(block))
-        coordinates_list.append([float(c) for c in box])
+        block: dict[str, Any] = {
+            "type": str(raw.get("type") or "paragraph"),
+            "content": str(raw.get("content") or ""),
+            "page": _safe_int(raw.get("page", 1), 1),
+            "box": [float(c) for c in box],
+        }
+
+        # Keep only optional fields expected by downstream consumers of content.json files.
+        for optional_key in [
+            "filepath",
+            "number",
+            "caption",
+            "footnotes",
+            "block",
+            "column_headers",
+            "row_indexes",
+        ]:
+            if optional_key in raw:
+                block[optional_key] = raw.get(optional_key)
+
+        formatted_blocks.append(block)
 
     return {
-        "Text": text_list,
-        "Type": type_list,
-        "Coordinates": coordinates_list,
+        "metadata": metadata,
+        "blocks": formatted_blocks,
+        "references": references,
     }
 
 
@@ -256,6 +266,29 @@ def _find_first_content_json(output_tmp: str) -> Path:
     if not content_files:
         raise RuntimeError("Pipeline finished without generating *_content.json output.")
     return content_files[0]
+
+
+def _read_native_content_envelope(output_tmp: str) -> dict[str, Any]:
+    try:
+        content_path = _find_first_content_json(output_tmp)
+    except Exception:
+        return {"metadata": {}, "references": []}
+
+    try:
+        with open(content_path, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+    except Exception:
+        return {"metadata": {}, "references": []}
+
+    if not isinstance(parsed, dict):
+        return {"metadata": {}, "references": []}
+
+    metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+    references = parsed.get("references") if isinstance(parsed.get("references"), list) else []
+    return {
+        "metadata": metadata,
+        "references": references,
+    }
 
 
 def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
@@ -651,6 +684,8 @@ async def upload_and_process(
                 pdf2data_table_model=pdf2data_table_model,
             )
 
+            native_content = _read_native_content_envelope(output_tmp)
+
             copied_assets = _persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
 
             doc = fitz.open(str(file_path))
@@ -692,10 +727,9 @@ async def upload_and_process(
                     "pdf2data_layout_model": pdf2data_layout_model,
                     "pdf2data_table_model": pdf2data_table_model,
                 },
+                "metadata": native_content["metadata"],
+                "references": native_content["references"],
                 "blocks": blocks_data,
-                **_build_columnar_fields(blocks_data),
-                "amount": len(blocks_data),
-                "doi": "",
                 "pdf_size": pdf_size,
                 "page_sizes": page_sizes,
                 "assets_count": copied_assets,
@@ -713,12 +747,7 @@ async def save_edited_json(payload: SaveEditedPayload):
         output_root.mkdir(parents=True, exist_ok=True)
 
         data = dict(payload.data)
-        blocks = data.get("blocks")
-        if isinstance(blocks, list):
-            data.update(_build_columnar_fields(blocks))
-            data["amount"] = len(blocks)
-
-        data.setdefault("doi", "")
+        formatted = _format_as_content_json(data)
         raw_name = str(payload.document_name or data.get("id") or uuid.uuid4()).strip()
         safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
         safe_name = safe_name or str(uuid.uuid4())
@@ -732,7 +761,7 @@ async def save_edited_json(payload: SaveEditedPayload):
         file_path = doc_folder / filename
 
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(formatted, f, indent=2, ensure_ascii=False)
 
         return {
             "saved_path": str(file_path),

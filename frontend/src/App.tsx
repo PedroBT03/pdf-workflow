@@ -64,6 +64,37 @@ const sanitizePathSegments = (pathValue: string) =>
     .filter(Boolean)
     .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
 
+const toCanonicalContentJson = (raw: any) => {
+  const metadata = raw && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : {};
+  const references = Array.isArray(raw?.references) ? raw.references : [];
+  const blocksInput = Array.isArray(raw?.blocks) ? raw.blocks : [];
+
+  const blocks = blocksInput
+    .filter((block: any) => Array.isArray(block?.box) && block.box.length === 4)
+    .map((block: any) => {
+      const canonical: any = {
+        type: String(block?.type ?? 'paragraph'),
+        content: String(block?.content ?? ''),
+        page: Number(block?.page ?? 1),
+        box: block.box.map((n: any) => Number(n)),
+      };
+
+      for (const optionalKey of ['filepath', 'number', 'caption', 'footnotes', 'block', 'column_headers', 'row_indexes']) {
+        if (optionalKey in block) {
+          canonical[optionalKey] = block[optionalKey];
+        }
+      }
+
+      return canonical;
+    });
+
+  return {
+    metadata,
+    blocks,
+    references,
+  };
+};
+
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -301,16 +332,6 @@ const App = () => {
       .join('');
 
     const exportData = JSON.parse(JSON.stringify(parsedData));
-    if (Array.isArray(exportData.blocks)) {
-      exportData.Text = exportData.blocks.map((block: any) => String(block?.content ?? ''));
-      exportData.Type = exportData.blocks.map((block: any) => String(block?.type ?? 'paragraph'));
-      exportData.Coordinates = exportData.blocks
-        .map((block: any) => block?.box)
-        .filter((box: any) => Array.isArray(box) && box.length === 4)
-        .map((box: any) => box.map((n: any) => Number(n)));
-      exportData.amount = exportData.blocks.length;
-    }
-    if (!('doi' in exportData)) exportData.doi = '';
 
     try {
       const folderName = safeName || 'metadata';
@@ -393,7 +414,8 @@ const App = () => {
       const fileName = `${folderName}_content.json`;
       const fileHandle = await docFolder.getFileHandle(fileName, { create: true });
       const writable = await fileHandle.createWritable();
-      await writable.write(new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
+      const canonicalContentJson = toCanonicalContentJson(exportData);
+      await writable.write(new Blob([JSON.stringify(canonicalContentJson, null, 2)], { type: 'application/json' }));
       await writable.close();
 
       if (manifestAssets.length === 0) {

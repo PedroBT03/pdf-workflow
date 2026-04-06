@@ -8,12 +8,16 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-def test_save_edited_json_creates_document_structure_and_rebuilds_columns(client, tmp_path):
-    # Verifies that /api/save-edited-json creates the target folder structure and recomputes Text/Type/Coordinates/amount from blocks.
+def test_save_edited_json_creates_document_structure_with_canonical_schema(client, tmp_path):
+    # Verifies that /api/save-edited-json stores content.json in canonical shape: metadata, blocks, references.
     payload = {
         "output_folder": str(tmp_path),
         "document_name": "paper-01",
         "data": {
+            "metadata": {
+                "title": ["Example title"],
+                "doi": ["10.0000/example"],
+            },
             "blocks": [
                 {
                     "content": "First paragraph",
@@ -24,8 +28,10 @@ def test_save_edited_json_creates_document_structure_and_rebuilds_columns(client
                     "content": "Figure caption",
                     "type": "Figure",
                     "box": [30, 80, 300, 140],
+                    "filepath": "paper-01_images/Figure_1.png",
                 },
-            ]
+            ],
+            "references": [{"citation-number": ["1"]}],
         },
     }
 
@@ -44,11 +50,17 @@ def test_save_edited_json_creates_document_structure_and_rebuilds_columns(client
     assert saved_path.name == "paper-01_content.json"
 
     saved_json = json.loads(saved_path.read_text(encoding="utf-8"))
-    assert saved_json["amount"] == 2
-    assert saved_json["doi"] == ""
-    assert saved_json["Text"] == ["First paragraph", "Figure caption"]
-    assert saved_json["Type"] == ["paragraph", "Figure"]
-    assert saved_json["Coordinates"] == [[10.0, 20.0, 200.0, 60.0], [30.0, 80.0, 300.0, 140.0]]
+    assert set(saved_json.keys()) == {"metadata", "blocks", "references"}
+    assert saved_json["metadata"]["title"] == ["Example title"]
+    assert saved_json["references"] == [{"citation-number": ["1"]}]
+    assert len(saved_json["blocks"]) == 2
+    assert saved_json["blocks"][0] == {
+        "type": "paragraph",
+        "content": "First paragraph",
+        "page": 1,
+        "box": [10.0, 20.0, 200.0, 60.0],
+    }
+    assert saved_json["blocks"][1]["filepath"] == "paper-01_images/Figure_1.png"
 
 
 def test_assets_manifest_lists_only_image_files(client, tmp_path, monkeypatch):
