@@ -30,6 +30,19 @@ def test_save_edited_json_creates_document_structure_with_canonical_schema(clien
                     "box": [30, 80, 300, 140],
                     "filepath": "paper-01_images/Figure_1.png",
                 },
+                {
+                    "content": "Table",
+                    "type": "Table",
+                    "box": [40, 150, 340, 280],
+                    "block": [["H1", "H2"], ["A", "B"]],
+                    "cell_boxes": [
+                        [[40, 150, 190, 180], [190, 150, 340, 180]],
+                        [[40, 180, 190, 280], [190, 180, 340, 280]],
+                    ],
+                    "caption": "Table caption",
+                    "caption_box": [40, 282, 340, 298],
+                    "caption_boxes": [[40, 282, 340, 298]],
+                },
             ],
             "references": [{"citation-number": ["1"]}],
         },
@@ -53,7 +66,7 @@ def test_save_edited_json_creates_document_structure_with_canonical_schema(clien
     assert set(saved_json.keys()) == {"metadata", "blocks", "references"}
     assert saved_json["metadata"]["title"] == ["Example title"]
     assert saved_json["references"] == [{"citation-number": ["1"]}]
-    assert len(saved_json["blocks"]) == 2
+    assert len(saved_json["blocks"]) == 3
     assert saved_json["blocks"][0] == {
         "type": "paragraph",
         "content": "First paragraph",
@@ -61,6 +74,9 @@ def test_save_edited_json_creates_document_structure_with_canonical_schema(clien
         "box": [10.0, 20.0, 200.0, 60.0],
     }
     assert saved_json["blocks"][1]["filepath"] == "paper-01_images/Figure_1.png"
+    assert saved_json["blocks"][2]["cell_boxes"][0][0] == [40, 150, 190, 180]
+    assert saved_json["blocks"][2]["caption_box"] == [40, 282, 340, 298]
+    assert saved_json["blocks"][2]["caption_boxes"][0] == [40, 282, 340, 298]
 
 
 def test_assets_manifest_lists_only_image_files(client, tmp_path, monkeypatch):

@@ -72,6 +72,9 @@ def _format_as_content_json(data: dict) -> dict:
             "caption",
             "footnotes",
             "block",
+            "cell_boxes",
+            "caption_box",
+            "caption_boxes",
             "column_headers",
             "row_indexes",
         ]:

@@ -16,6 +16,11 @@ type ProcessorOption = {
   reason?: string | null;
 };
 
+type SelectedTarget =
+  | { kind: 'block'; blockIndex: number }
+  | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
+  | { kind: 'tableCaption'; blockIndex: number };
+
 const DEFAULT_PROCESSORS: ProcessorOption[] = [
   { alias: 'pdf2data', label: 'PDF2Data', enabled: true },
   { alias: 'mineru', label: 'MinerU', enabled: true },
@@ -64,6 +69,77 @@ const sanitizePathSegments = (pathValue: string) =>
     .filter(Boolean)
     .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
 
+type Box4 = [number, number, number, number];
+
+const isTableWithGrid = (block: any) =>
+  String(block?.type ?? '').toLowerCase() === 'table' && Array.isArray(block?.block);
+
+const toBox4 = (value: any): Box4 | null => {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const nums = value.map((n) => Number(n));
+  if (nums.some((n) => Number.isNaN(n))) return null;
+  return [nums[0], nums[1], nums[2], nums[3]];
+};
+
+const getCellBoxesMatrix = (block: any, rowCount: number, colCount: number): Array<Array<Box4 | null>> => {
+  const empty = Array.from({ length: rowCount }).map(() => Array.from({ length: colCount }).map(() => null as Box4 | null));
+  const raw = block?.cell_boxes;
+  if (!Array.isArray(raw)) return empty;
+
+  // Preferred shape: cell_boxes[row][col] = [x1, y1, x2, y2]
+  if (raw.some((entry) => Array.isArray(entry) && Array.isArray(entry[0]))) {
+    for (let r = 0; r < rowCount; r += 1) {
+      const row = Array.isArray(raw[r]) ? raw[r] : [];
+      for (let c = 0; c < colCount; c += 1) {
+        empty[r][c] = toBox4(row[c]);
+      }
+    }
+    return empty;
+  }
+
+  // Legacy flat fallback: cell_boxes[idx] = [x1, y1, x2, y2]
+  for (let r = 0; r < rowCount; r += 1) {
+    for (let c = 0; c < colCount; c += 1) {
+      const idx = r * colCount + c;
+      empty[r][c] = toBox4(raw[idx]);
+    }
+  }
+  return empty;
+};
+
+const getCaptionBoxes = (block: any): Box4[] => {
+  const singular = toBox4(block?.caption_box);
+  if (singular) {
+    return [singular];
+  }
+
+  const raw = block?.caption_boxes;
+  if (!raw) return [];
+
+  if (Array.isArray(raw) && raw.length === 4 && !Array.isArray(raw[0])) {
+    const single = toBox4(raw);
+    return single ? [single] : [];
+  }
+
+  if (Array.isArray(raw)) {
+    return raw.map((entry) => toBox4(entry)).filter((b): b is Box4 => b !== null);
+  }
+
+  return [];
+};
+
+const getTableDimensions = (tableRows: any[]) => {
+  const rows = tableRows.length;
+  const cols = tableRows.reduce((max, row) => {
+    if (!Array.isArray(row)) return max;
+    return Math.max(max, row.length);
+  }, 0);
+  return {
+    rows,
+    cols: Math.max(1, cols),
+  };
+};
+
 const toCanonicalContentJson = (raw: any) => {
   const metadata = raw && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : {};
   const references = Array.isArray(raw?.references) ? raw.references : [];
@@ -79,7 +155,7 @@ const toCanonicalContentJson = (raw: any) => {
         box: block.box.map((n: any) => Number(n)),
       };
 
-      for (const optionalKey of ['filepath', 'number', 'caption', 'footnotes', 'block', 'column_headers', 'row_indexes']) {
+      for (const optionalKey of ['filepath', 'number', 'caption', 'footnotes', 'block', 'cell_boxes', 'caption_box', 'caption_boxes', 'column_headers', 'row_indexes']) {
         if (optionalKey in block) {
           canonical[optionalKey] = block[optionalKey];
         }
@@ -99,7 +175,7 @@ const App = () => {
   const [docData, setDocData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [jsonDraft, setJsonDraft] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
   const [selectedContent, setSelectedContent] = useState('');
   const [editorFeedback, setEditorFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -133,7 +209,7 @@ const App = () => {
   const resetWorkflow = () => {
     setDocData(null);
     setJsonDraft('');
-    setSelectedIndex(null);
+    setSelectedTarget(null);
     setSelectedContent('');
     setEditorFeedback(null);
     setExportFeedback(null);
@@ -222,14 +298,30 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    if (selectedIndex === null || !Array.isArray(parsedData?.blocks)) {
+    if (!selectedTarget || !Array.isArray(parsedData?.blocks)) {
       setSelectedContent('');
       return;
     }
 
-    const block = parsedData.blocks[selectedIndex];
+    const block = parsedData.blocks[selectedTarget.blockIndex];
+    if (!block) {
+      setSelectedContent('');
+      return;
+    }
+
+    if (selectedTarget.kind === 'tableCell') {
+      const cellValue = block?.block?.[selectedTarget.row]?.[selectedTarget.col];
+      setSelectedContent(typeof cellValue === 'string' ? cellValue : String(cellValue ?? ''));
+      return;
+    }
+
+    if (selectedTarget.kind === 'tableCaption') {
+      setSelectedContent(typeof block?.caption === 'string' ? block.caption : String(block?.caption ?? ''));
+      return;
+    }
+
     setSelectedContent(typeof block?.content === 'string' ? block.content : '');
-  }, [selectedIndex, parsedData]);
+  }, [selectedTarget, parsedData]);
 
   // 1. Upload and process document
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -259,7 +351,7 @@ const App = () => {
       setSourceFilename(file.name);
       setDocData(data);
       setJsonDraft(JSON.stringify(data, null, 2));
-      setSelectedIndex(null);
+      setSelectedTarget(null);
       setSelectedContent('');
       setEditorFeedback(null);
       setExportFeedback(null);
@@ -305,14 +397,33 @@ const App = () => {
 
   const updateSelectedContent = (value: string) => {
     setSelectedContent(value);
-    if (selectedIndex === null || !parsedData || !Array.isArray(parsedData.blocks)) return;
+    if (!selectedTarget || !parsedData || !Array.isArray(parsedData.blocks)) return;
 
     const next = JSON.parse(JSON.stringify(parsedData));
-    if (!next.blocks[selectedIndex]) return;
+    const targetBlock = next.blocks[selectedTarget.blockIndex];
+    if (!targetBlock) return;
 
-    next.blocks[selectedIndex].content = value;
-    if (Array.isArray(next.Text) && selectedIndex < next.Text.length) {
-      next.Text[selectedIndex] = value;
+    if (selectedTarget.kind === 'tableCell') {
+      if (!Array.isArray(targetBlock.block)) {
+        targetBlock.block = [];
+      }
+      if (!Array.isArray(targetBlock.block[selectedTarget.row])) {
+        targetBlock.block[selectedTarget.row] = [];
+      }
+      targetBlock.block[selectedTarget.row][selectedTarget.col] = value;
+      setJsonDraft(JSON.stringify(next, null, 2));
+      return;
+    }
+
+    if (selectedTarget.kind === 'tableCaption') {
+      targetBlock.caption = value;
+      setJsonDraft(JSON.stringify(next, null, 2));
+      return;
+    }
+
+    targetBlock.content = value;
+    if (Array.isArray(next.Text) && selectedTarget.blockIndex < next.Text.length) {
+      next.Text[selectedTarget.blockIndex] = value;
     }
     setJsonDraft(JSON.stringify(next, null, 2));
   };
@@ -469,15 +580,15 @@ const App = () => {
   const currentPageBlocks: Array<{ block: any; index: number }> = previewBlocks
     .map((block: any, i: number) => ({ block, index: i }))
     .filter(({ block }: { block: any }) => Number(block?.page ?? 1) === currentPage);
-  const selectedBlock = selectedIndex !== null ? previewBlocks[selectedIndex] : null;
+  const selectedBlock = selectedTarget ? previewBlocks[selectedTarget.blockIndex] : null;
 
   const goToPreviousPage = () => {
-    setSelectedIndex(null);
+    setSelectedTarget(null);
     setCurrentPage((p) => Math.max(1, p - 1));
   };
 
   const goToNextPage = () => {
-    setSelectedIndex(null);
+    setSelectedTarget(null);
     setCurrentPage((p) => Math.min(numPages || 1, p + 1));
   };
 
@@ -589,19 +700,114 @@ const App = () => {
                           const top = y1 * pageSizes[currentPage].scale;
                           const width = (x2 - x1) * pageSizes[currentPage].scale;
                           const height = (y2 - y1) * pageSizes[currentPage].scale;
-                          const isSelected = selectedIndex === index;
+                          const isSelectedBlock =
+                            selectedTarget?.kind === 'block' && selectedTarget.blockIndex === index;
+
+                          if (isTableWithGrid(block)) {
+                            const tableRows = Array.isArray(block.block) ? block.block : [];
+                            const { rows, cols } = getTableDimensions(tableRows);
+                            const safeRows = Math.max(1, rows);
+                            const cellBoxesMatrix = getCellBoxesMatrix(block, safeRows, cols);
+                            const hasEditableCells = cellBoxesMatrix.some((row) => row.some((cell) => cell !== null));
+
+                            const captionBoxes = getCaptionBoxes(block);
+                            const hasEditableCaption = captionBoxes.length > 0;
+                            const isTableEditable = hasEditableCells || hasEditableCaption;
+
+                            if (!isTableEditable) {
+                              return (
+                                <div
+                                  key={`${index}-not-editable`}
+                                  className="absolute pointer-events-none border border-rose-400/70 bg-rose-500/10 text-rose-200 text-[11px] font-medium px-2 py-1"
+                                  style={{ left, top, width, height: Math.max(20, Math.min(32, height)) }}
+                                  title="Not possible to edit this table"
+                                >
+                                  Not possible to edit this table
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <React.Fragment key={index}>
+                                {Array.from({ length: safeRows }).map((_, rowIdx) =>
+                                  Array.from({ length: cols }).map((__, colIdx) => {
+                                    const cellSelected =
+                                      selectedTarget?.kind === 'tableCell' &&
+                                      selectedTarget.blockIndex === index &&
+                                      selectedTarget.row === rowIdx &&
+                                      selectedTarget.col === colIdx;
+
+                                    const precise = cellBoxesMatrix[rowIdx][colIdx];
+                                    if (!precise) {
+                                      return null;
+                                    }
+
+                                    const [cx1, cy1, cx2, cy2] = precise;
+
+                                    return (
+                                      <div
+                                        key={`${index}-cell-${rowIdx}-${colIdx}`}
+                                        className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                                          cellSelected
+                                            ? 'border-2 border-emerald-300 bg-emerald-300/20'
+                                            : 'border border-emerald-400/80 bg-emerald-400/10 hover:bg-emerald-400/20'
+                                        }`}
+                                        style={{
+                                          left: cx1 * pageSizes[currentPage].scale,
+                                          top: cy1 * pageSizes[currentPage].scale,
+                                          width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
+                                          height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
+                                        }}
+                                        title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
+                                        onClick={() =>
+                                          setSelectedTarget({
+                                            kind: 'tableCell',
+                                            blockIndex: index,
+                                            row: rowIdx,
+                                            col: colIdx,
+                                          })
+                                        }
+                                      />
+                                    );
+                                  })
+                                )}
+
+                                {captionBoxes.map((captionBox, captionIdx) => {
+                                  const [cx1, cy1, cx2, cy2] = captionBox;
+                                  return (
+                                    <div
+                                      key={`${index}-caption-${captionIdx}`}
+                                      className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                                        selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index
+                                          ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
+                                          : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
+                                      }`}
+                                      style={{
+                                        left: cx1 * pageSizes[currentPage].scale,
+                                        top: cy1 * pageSizes[currentPage].scale,
+                                        width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
+                                        height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
+                                      }}
+                                      title="Table caption"
+                                      onClick={() => setSelectedTarget({ kind: 'tableCaption', blockIndex: index })}
+                                    />
+                                  );
+                                })}
+                              </React.Fragment>
+                            );
+                          }
 
                           return (
                             <div
                               key={index}
                               className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
-                                isSelected
+                                isSelectedBlock
                                   ? 'border-2 border-amber-300 bg-amber-300/20'
                                   : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
                               }`}
                               style={{ left, top, width, height }}
                               title={block?.content || `Block ${index}`}
-                              onClick={() => setSelectedIndex(index)}
+                              onClick={() => setSelectedTarget({ kind: 'block', blockIndex: index })}
                             />
                           );
                         })}
@@ -656,14 +862,18 @@ const App = () => {
                 Click a box on the PDF to edit only that box metadata.
               </div>
 
-              {selectedIndex === null ? (
+              {selectedTarget === null ? (
                 <div className="h-72 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
                   No box selected.
                 </div>
               ) : (
                 <div className="flex flex-col gap-3">
                   <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
-                    Selected box: #{selectedIndex + 1}
+                    {selectedTarget.kind === 'tableCell'
+                      ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
+                      : selectedTarget.kind === 'tableCaption'
+                      ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
+                      : `Selected box: #${selectedTarget.blockIndex + 1}`}
                   </div>
                   {selectedBlock && (
                     <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
