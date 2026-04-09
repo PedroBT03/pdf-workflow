@@ -21,6 +21,30 @@ type SelectedTarget =
   | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
   | { kind: 'tableCaption'; blockIndex: number };
 
+type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json';
+type UpgradeMode = 'text' | 'figures' | 'both';
+
+type WorkflowPathItem = {
+  id: string;
+  action: WorkflowActionId;
+  label: string;
+  status: 'done' | 'failed';
+  detail?: string;
+  timestamp: string;
+};
+
+const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
+  extract_json_from_pdf: 'Extract JSON from PDF',
+  edit_json: 'Visualize / Edit JSON',
+  upgrade_json: 'Upgrade JSON',
+};
+
+const UPGRADE_MODE_LABELS: Record<UpgradeMode, string> = {
+  text: 'Text only (unicode fixes)',
+  figures: 'Figures only (merge close figures)',
+  both: 'Text + Figures',
+};
+
 const DEFAULT_PROCESSORS: ProcessorOption[] = [
   { alias: 'pdf2data', label: 'PDF2Data', enabled: true },
   { alias: 'mineru', label: 'MinerU', enabled: true },
@@ -177,6 +201,15 @@ const App = () => {
   const [jsonDraft, setJsonDraft] = useState('');
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
   const [selectedContent, setSelectedContent] = useState('');
+  const [selectedAction, setSelectedAction] = useState<WorkflowActionId>('extract_json_from_pdf');
+  const [upgradeMode, setUpgradeMode] = useState<UpgradeMode>('both');
+  const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
+  const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [activeSidebarTab, setActiveSidebarTab] = useState<'workflow' | 'artifacts' | 'editor'>('workflow');
+  const [editSessionEnabled, setEditSessionEnabled] = useState(false);
+  const [hasEditedJson, setHasEditedJson] = useState(false);
+  const [editedJson, setEditedJson] = useState<any | null>(null);
+  const [upgradedJson, setUpgradedJson] = useState<any | null>(null);
   const [editorFeedback, setEditorFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [numPages, setNumPages] = useState(0);
@@ -211,6 +244,15 @@ const App = () => {
     setJsonDraft('');
     setSelectedTarget(null);
     setSelectedContent('');
+    setSelectedAction('extract_json_from_pdf');
+    setUpgradeMode('both');
+    setWorkflowPath([]);
+    setWorkflowMessage(null);
+    setActiveSidebarTab('workflow');
+    setEditSessionEnabled(false);
+    setHasEditedJson(false);
+    setEditedJson(null);
+    setUpgradedJson(null);
     setEditorFeedback(null);
     setExportFeedback(null);
     setNumPages(0);
@@ -243,6 +285,28 @@ const App = () => {
   const parsedData = parsedState?.data ?? null;
   const jsonError = parsedState?.error ?? null;
   const disabledProcessors = useMemo(() => processorOptions.filter((item) => !item.enabled), [processorOptions]);
+  const hasPdfArtifact = Boolean(pdfFile);
+  const hasJsonArtifact = Boolean(parsedData && Array.isArray(parsedData.blocks));
+  const hasUpgradedArtifact = Boolean(upgradedJson);
+
+  const canRunAction = (action: WorkflowActionId) => {
+    if (action === 'extract_json_from_pdf') return hasPdfArtifact;
+    if (action === 'edit_json') return hasJsonArtifact;
+    if (action === 'upgrade_json') return hasJsonArtifact;
+    return false;
+  };
+
+  const appendWorkflowPath = (action: WorkflowActionId, status: 'done' | 'failed', detail?: string) => {
+    const item: WorkflowPathItem = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      action,
+      label: WORKFLOW_ACTION_LABELS[action],
+      status,
+      detail,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+    setWorkflowPath((prev) => [...prev, item]);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -323,15 +387,43 @@ const App = () => {
     setSelectedContent(typeof block?.content === 'string' ? block.content : '');
   }, [selectedTarget, parsedData]);
 
-  // 1. Upload and process document
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportPdf = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    setPdfFile(file);
+    setSourceFilename(file.name);
+    setDocData(null);
+    setJsonDraft('');
+    setSelectedTarget(null);
+    setSelectedContent('');
+    setEditorFeedback(null);
+    setExportFeedback(null);
+    setWorkflowMessage({ type: 'success', message: 'PDF imported. Choose an action from the workflow menu.' });
+    setNumPages(0);
+    setCurrentPage(1);
+    setPageSizes({});
+    setEditSessionEnabled(false);
+    setHasEditedJson(false);
+    setEditedJson(null);
+    setUpgradedJson(null);
+    setActiveSidebarTab('workflow');
+    setWorkflowPath([]);
+    e.target.value = '';
+  };
+
+  const runExtractJsonAction = async () => {
+    if (!pdfFile) {
+      const message = 'Import a PDF before running this action.';
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('extract_json_from_pdf', 'failed', message);
+      return;
+    }
 
     setLoading(true);
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', pdfFile, sourceFilename || 'document.pdf');
     formData.append('processor', processor);
     if (processor === 'pdf2data') {
       formData.append('pdf2data_layout_model', pdf2dataLayoutModel);
@@ -347,29 +439,118 @@ const App = () => {
       if (!response.ok) throw new Error('AI processing failed');
       const data = await response.json();
 
-      setPdfFile(file);
-      setSourceFilename(file.name);
       setDocData(data);
       setJsonDraft(JSON.stringify(data, null, 2));
       setSelectedTarget(null);
       setSelectedContent('');
       setEditorFeedback(null);
       setExportFeedback(null);
-      setNumPages(0);
+      setWorkflowMessage({ type: 'success', message: 'Action completed: JSON extracted from PDF.' });
+      appendWorkflowPath('extract_json_from_pdf', 'done', `Blocks: ${Array.isArray(data?.blocks) ? data.blocks.length : 0}`);
+      setActiveSidebarTab('artifacts');
+      setNumPages(Array.isArray(data?.page_sizes) ? data.page_sizes.length : 0);
       setCurrentPage(1);
       setPageSizes({});
+      setEditSessionEnabled(false);
+      setHasEditedJson(false);
+      setEditedJson(null);
+      setUpgradedJson(null);
     } catch (err: any) {
       console.error(err);
+      const message = `Action failed: ${err.message || 'unknown error'}`;
       showEditorFeedback('error', `Error processing PDF: ${err.message || 'unknown error'}`, 4000);
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('extract_json_from_pdf', 'failed', message);
     } finally {
       setLoading(false);
-      e.target.value = '';
     }
+  };
+
+  const runEditJsonAction = () => {
+    if (!hasJsonArtifact) {
+      const message = 'Run Extract JSON first.';
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('edit_json', 'failed', message);
+      return;
+    }
+
+    setEditSessionEnabled(true);
+    setActiveSidebarTab('editor');
+    setWorkflowMessage({ type: 'success', message: 'Edit mode enabled. Select a box to start editing.' });
+    appendWorkflowPath('edit_json', 'done', 'Editor enabled');
+  };
+
+  const runUpgradeJsonAction = async () => {
+    if (!hasJsonArtifact) {
+      const message = 'Run Extract JSON first.';
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('upgrade_json', 'failed', message);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/actions/upgrade-json`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: upgradeMode,
+          data: parsedData,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.detail || `upgrade request failed (${response.status})`);
+      }
+
+      const upgraded = payload?.data;
+      if (!upgraded || !Array.isArray(upgraded?.blocks)) {
+        throw new Error('backend returned invalid upgraded JSON');
+      }
+
+      setUpgradedJson(upgraded);
+      setJsonDraft(JSON.stringify(upgraded, null, 2));
+      setSelectedTarget(null);
+      setSelectedContent('');
+      setActiveSidebarTab('artifacts');
+
+      const beforeCount = Number(payload?.summary?.blocks_before ?? 0);
+      const afterCount = Number(payload?.summary?.blocks_after ?? upgraded.blocks.length);
+      setWorkflowMessage({
+        type: 'success',
+        message: `Upgrade completed (${UPGRADE_MODE_LABELS[upgradeMode]}). Blocks: ${beforeCount} -> ${afterCount}.`,
+      });
+      appendWorkflowPath('upgrade_json', 'done', `${upgradeMode} | blocks ${beforeCount}->${afterCount}`);
+    } catch (err: any) {
+      console.error(err);
+      const message = `Action failed: ${err.message || 'unknown error'}`;
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('upgrade_json', 'failed', message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runSelectedAction = async () => {
+    if (selectedAction === 'extract_json_from_pdf') {
+      await runExtractJsonAction();
+      return;
+    }
+    if (selectedAction === 'edit_json') {
+      runEditJsonAction();
+      return;
+    }
+    await runUpgradeJsonAction();
   };
 
   const onDocumentLoadSuccess = ({ numPages: totalPages }: { numPages: number }) => {
     setNumPages(totalPages);
-    setCurrentPage(1);
+    setCurrentPage((prev) => {
+      if (prev < 1) return 1;
+      if (prev > totalPages) return totalPages;
+      return prev;
+    });
   };
 
   const onPageLoadSuccess = (pageNumber: number, page: any) => {
@@ -396,6 +577,11 @@ const App = () => {
   };
 
   const updateSelectedContent = (value: string) => {
+    if (!editSessionEnabled) {
+      showEditorFeedback('info', 'Run the "Visualize / Edit JSON" action to enable editing.', 2600);
+      return;
+    }
+
     setSelectedContent(value);
     if (!selectedTarget || !parsedData || !Array.isArray(parsedData.blocks)) return;
 
@@ -411,12 +597,16 @@ const App = () => {
         targetBlock.block[selectedTarget.row] = [];
       }
       targetBlock.block[selectedTarget.row][selectedTarget.col] = value;
+      setHasEditedJson(true);
+      setEditedJson(next);
       setJsonDraft(JSON.stringify(next, null, 2));
       return;
     }
 
     if (selectedTarget.kind === 'tableCaption') {
       targetBlock.caption = value;
+      setHasEditedJson(true);
+      setEditedJson(next);
       setJsonDraft(JSON.stringify(next, null, 2));
       return;
     }
@@ -425,6 +615,8 @@ const App = () => {
     if (Array.isArray(next.Text) && selectedTarget.blockIndex < next.Text.length) {
       next.Text[selectedTarget.blockIndex] = value;
     }
+    setHasEditedJson(true);
+    setEditedJson(next);
     setJsonDraft(JSON.stringify(next, null, 2));
   };
 
@@ -443,6 +635,8 @@ const App = () => {
       .join('');
 
     const exportData = JSON.parse(JSON.stringify(parsedData));
+    const editedSnapshot = editedJson ? JSON.parse(JSON.stringify(editedJson)) : null;
+    const upgradedSnapshot = upgradedJson ? JSON.parse(JSON.stringify(upgradedJson)) : null;
 
     try {
       const folderName = safeName || 'metadata';
@@ -522,19 +716,39 @@ const App = () => {
         }
       }
 
-      const fileName = `${folderName}_content.json`;
-      const fileHandle = await docFolder.getFileHandle(fileName, { create: true });
-      const writable = await fileHandle.createWritable();
-      const canonicalContentJson = toCanonicalContentJson(exportData);
-      await writable.write(new Blob([JSON.stringify(canonicalContentJson, null, 2)], { type: 'application/json' }));
-      await writable.close();
+      const filesToWrite: Array<{ name: string; data: any }> = [];
+      filesToWrite.push({ name: `${folderName}_content.json`, data: exportData });
+
+      if (editedSnapshot) {
+        const editedSerialized = JSON.stringify(toCanonicalContentJson(editedSnapshot));
+        const currentSerialized = JSON.stringify(toCanonicalContentJson(exportData));
+        if (editedSerialized !== currentSerialized) {
+          filesToWrite.push({ name: `${folderName}_edited_content.json`, data: editedSnapshot });
+        }
+      }
+
+      if (upgradedSnapshot) {
+        const upgradedSerialized = JSON.stringify(toCanonicalContentJson(upgradedSnapshot));
+        const currentSerialized = JSON.stringify(toCanonicalContentJson(exportData));
+        if (upgradedSerialized !== currentSerialized) {
+          filesToWrite.push({ name: `${folderName}_upgraded_content.json`, data: upgradedSnapshot });
+        }
+      }
+
+      for (const item of filesToWrite) {
+        const fileHandle = await docFolder.getFileHandle(item.name, { create: true });
+        const writable = await fileHandle.createWritable();
+        const canonicalContentJson = toCanonicalContentJson(item.data);
+        await writable.write(new Blob([JSON.stringify(canonicalContentJson, null, 2)], { type: 'application/json' }));
+        await writable.close();
+      }
 
       if (manifestAssets.length === 0) {
-        showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName} (no image assets in this document).`);
+        showExportFeedback('success', `Saved ${filesToWrite.length} JSON file(s) to ${outputFolderName}/${folderName}/ (no image assets in this document).`);
       } else if (failedImages === 0) {
-        showExportFeedback('success', `Saved to ${outputFolderName}/${folderName}/${fileName} with ${copiedImages} image asset(s).`);
+        showExportFeedback('success', `Saved ${filesToWrite.length} JSON file(s) and ${copiedImages} image asset(s) to ${outputFolderName}/${folderName}/.`);
       } else {
-        showExportFeedback('info', `Saved JSON, copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
+        showExportFeedback('info', `Saved ${filesToWrite.length} JSON file(s), copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
       }
     } catch (err: any) {
       showExportFeedback('error', `Export failed: ${err.message || 'unknown error'}`, 4000);
@@ -594,7 +808,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center p-6 font-sans">
-      {!docData && (
+      {!pdfFile && (
         <div className="mt-20 bg-zinc-900 p-16 rounded-3xl border border-zinc-800 text-center shadow-2xl max-w-lg w-full">
           <div className="bg-blue-600/10 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-8">
             <FileText className="w-10 h-10 text-blue-500" />
@@ -604,9 +818,9 @@ const App = () => {
 
           <label className="cursor-pointer group">
             <div className="bg-blue-600 group-hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl transition-all shadow-lg shadow-blue-900/20 flex items-center justify-center gap-3">
-              <Upload className="w-5 h-5" /> Select Document
+              <Upload className="w-5 h-5" /> Import PDF
             </div>
-            <input type="file" onChange={handleUpload} className="hidden" accept=".pdf" />
+            <input type="file" onChange={handleImportPdf} className="hidden" accept=".pdf" />
           </label>
 
           <div className="mt-5 text-left">
@@ -665,7 +879,7 @@ const App = () => {
         </div>
       )}
 
-      {docData && (
+      {pdfFile && (
         <div className="flex gap-10 w-full max-w-400 justify-center items-start">
           <div className="relative bg-zinc-900 rounded-2xl shadow-2xl border-2 border-zinc-800 overflow-hidden">
             {pdfFile && (
@@ -747,7 +961,9 @@ const App = () => {
                                     return (
                                       <div
                                         key={`${index}-cell-${rowIdx}-${colIdx}`}
-                                        className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                                        className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                                          editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                        } ${
                                           cellSelected
                                             ? 'border-2 border-emerald-300 bg-emerald-300/20'
                                             : 'border border-emerald-400/80 bg-emerald-400/10 hover:bg-emerald-400/20'
@@ -759,14 +975,18 @@ const App = () => {
                                           height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
                                         }}
                                         title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
-                                        onClick={() =>
+                                        onClick={() => {
+                                          if (!editSessionEnabled) {
+                                            setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
+                                            return;
+                                          }
                                           setSelectedTarget({
                                             kind: 'tableCell',
                                             blockIndex: index,
                                             row: rowIdx,
                                             col: colIdx,
-                                          })
-                                        }
+                                          });
+                                        }}
                                       />
                                     );
                                   })
@@ -777,7 +997,9 @@ const App = () => {
                                   return (
                                     <div
                                       key={`${index}-caption-${captionIdx}`}
-                                      className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                                      className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                                        editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                      } ${
                                         selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index
                                           ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
                                           : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
@@ -789,7 +1011,13 @@ const App = () => {
                                         height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
                                       }}
                                       title="Table caption"
-                                      onClick={() => setSelectedTarget({ kind: 'tableCaption', blockIndex: index })}
+                                      onClick={() => {
+                                        if (!editSessionEnabled) {
+                                          setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
+                                          return;
+                                        }
+                                        setSelectedTarget({ kind: 'tableCaption', blockIndex: index });
+                                      }}
                                     />
                                   );
                                 })}
@@ -800,14 +1028,22 @@ const App = () => {
                           return (
                             <div
                               key={index}
-                              className={`absolute overflow-hidden pointer-events-auto cursor-pointer transition-colors ${
+                              className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                                editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                              } ${
                                 isSelectedBlock
                                   ? 'border-2 border-amber-300 bg-amber-300/20'
                                   : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
                               }`}
                               style={{ left, top, width, height }}
                               title={block?.content || `Block ${index}`}
-                              onClick={() => setSelectedTarget({ kind: 'block', blockIndex: index })}
+                              onClick={() => {
+                                if (!editSessionEnabled) {
+                                  setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
+                                  return;
+                                }
+                                setSelectedTarget({ kind: 'block', blockIndex: index });
+                              }}
                             />
                           );
                         })}
@@ -839,9 +1075,9 @@ const App = () => {
             )}
           </div>
 
-          {/* JSON editor sidebar */}
+          {/* Workflow sidebar */}
           <div className="w-96 flex flex-col gap-6 sticky top-6">
-            <div className="bg-zinc-900 p-8 rounded-3xl border border-zinc-800 shadow-xl">
+            <div className="bg-zinc-900 p-6 rounded-3xl border border-zinc-800 shadow-xl">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div className="text-xs text-zinc-500 truncate" title={sourceFilename}>
                   PDF: <span className="text-zinc-300">{sourceFilename}</span>
@@ -854,72 +1090,208 @@ const App = () => {
                 </button>
               </div>
 
-              <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-                <Braces className="w-5 h-5 text-blue-500" /> Metadata Editor (JSON)
+              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                <Braces className="w-5 h-5 text-blue-500" /> Workflow
               </h2>
 
-              <div className="text-xs text-zinc-400 mb-4 bg-zinc-800/50 p-3 rounded-xl">
-                Click a box on the PDF to edit only that box metadata.
+              <div className="grid gap-3">
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-2">Select action</label>
+                  <select
+                    value={selectedAction}
+                    onChange={(e) => setSelectedAction(e.target.value as WorkflowActionId)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                  >
+                    <option value="extract_json_from_pdf">Extract JSON from PDF</option>
+                    <option value="edit_json">Visualize / Edit JSON</option>
+                    <option value="upgrade_json">Upgrade JSON</option>
+                  </select>
+                </div>
+
+                {selectedAction === 'upgrade_json' && (
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Upgrade mode</label>
+                    <select
+                      value={upgradeMode}
+                      onChange={(e) => setUpgradeMode(e.target.value as UpgradeMode)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                    >
+                      <option value="both">{UPGRADE_MODE_LABELS.both}</option>
+                      <option value="text">{UPGRADE_MODE_LABELS.text}</option>
+                      <option value="figures">{UPGRADE_MODE_LABELS.figures}</option>
+                    </select>
+                  </div>
+                )}
+
+                <button
+                  onClick={runSelectedAction}
+                  disabled={loading || !canRunAction(selectedAction)}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
+                >
+                  {loading ? 'Running action...' : 'Run action'}
+                </button>
               </div>
 
-              {selectedTarget === null ? (
-                <div className="h-72 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
-                  No box selected.
-                </div>
-              ) : (
-                <div className="flex flex-col gap-3">
-                  <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
-                    {selectedTarget.kind === 'tableCell'
-                      ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
-                      : selectedTarget.kind === 'tableCaption'
-                      ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
-                      : `Selected box: #${selectedTarget.blockIndex + 1}`}
-                  </div>
-                  {selectedBlock && (
-                    <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
-                      Page: {selectedBlock.page ?? 1}
-                    </div>
-                  )}
-                  <textarea
-                    className="w-full h-72 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
-                    value={selectedContent}
-                    onChange={(e) => updateSelectedContent(e.target.value)}
-                  />
-                </div>
-              )}
-
-              {jsonError && (
-                <div className="mt-3 text-xs text-red-300 bg-red-950/40 border border-red-900 p-3 rounded-xl">
-                  Invalid JSON: {jsonError}
-                </div>
-              )}
-
-              <button
-                onClick={formatJson}
-                className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
-              >
-                <CheckCircle2 className="w-4 h-4 text-zinc-400" />
-                Validate and Format JSON
-              </button>
-
-              {editorFeedback && (
+              {workflowMessage && (
                 <div
                   className={`mt-3 text-xs p-3 rounded-xl border ${
-                    editorFeedback.type === 'error'
+                    workflowMessage.type === 'error'
                       ? 'text-red-200 bg-red-950/40 border-red-900'
-                      : editorFeedback.type === 'success'
+                      : workflowMessage.type === 'success'
                       ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
                       : 'text-sky-200 bg-sky-950/40 border-sky-900'
                   }`}
                 >
-                  {editorFeedback.message}
+                  {workflowMessage.message}
+                </div>
+              )}
+
+              <div className="mt-4 text-xs text-zinc-400">Workflow path</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {workflowPath.length === 0 ? (
+                  <div className="text-xs text-zinc-500">No actions executed yet.</div>
+                ) : (
+                  workflowPath.map((item) => (
+                    <div
+                      key={item.id}
+                      className={`px-2 py-1 rounded-lg border text-[11px] ${
+                        item.status === 'done'
+                          ? 'border-emerald-900 bg-emerald-950/40 text-emerald-200'
+                          : 'border-red-900 bg-red-950/40 text-red-200'
+                      }`}
+                      title={item.detail || item.label}
+                    >
+                      {item.label} · {item.timestamp}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="mt-5 grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => setActiveSidebarTab('workflow')}
+                  className={`py-2 text-xs rounded-lg border ${
+                    activeSidebarTab === 'workflow'
+                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
+                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                  }`}
+                >
+                  Workflow
+                </button>
+                <button
+                  onClick={() => setActiveSidebarTab('artifacts')}
+                  className={`py-2 text-xs rounded-lg border ${
+                    activeSidebarTab === 'artifacts'
+                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
+                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                  }`}
+                >
+                  Artifacts
+                </button>
+                <button
+                  onClick={() => setActiveSidebarTab('editor')}
+                  className={`py-2 text-xs rounded-lg border ${
+                    activeSidebarTab === 'editor'
+                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
+                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                  }`}
+                >
+                  Editor
+                </button>
+              </div>
+
+              {activeSidebarTab === 'workflow' && (
+                <div className="mt-4 text-xs text-zinc-400 bg-zinc-800/40 p-3 rounded-xl border border-zinc-700">
+                  Action execution order is free. Preconditions are validated before each action runs.
+                </div>
+              )}
+
+              {activeSidebarTab === 'artifacts' && (
+                <div className="mt-4 grid gap-2 text-xs">
+                  <div className={`p-3 rounded-xl border ${hasPdfArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+                    PDF artifact: {hasPdfArtifact ? 'available' : 'missing'}
+                  </div>
+                  <div className={`p-3 rounded-xl border ${hasJsonArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+                    JSON artifact: {hasJsonArtifact ? 'available' : 'missing'}
+                  </div>
+                  <div className={`p-3 rounded-xl border ${hasEditedJson ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+                    Edited JSON artifact: {hasEditedJson ? 'available' : 'missing'}
+                  </div>
+                  <div className={`p-3 rounded-xl border ${hasUpgradedArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+                    Upgraded JSON artifact: {hasUpgradedArtifact ? 'available' : 'missing'}
+                  </div>
+                </div>
+              )}
+
+              {activeSidebarTab === 'editor' && (
+                <div className="mt-4">
+                  <div className="text-xs text-zinc-400 mb-3 bg-zinc-800/50 p-3 rounded-xl">
+                    {editSessionEnabled
+                      ? 'Click a box on the PDF to edit only that box metadata.'
+                      : 'Run "Visualize / Edit JSON" to enable box selection and editing.'}
+                  </div>
+
+                  {selectedTarget === null ? (
+                    <div className="h-48 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
+                      No box selected.
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                        {selectedTarget.kind === 'tableCell'
+                          ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
+                          : selectedTarget.kind === 'tableCaption'
+                          ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
+                          : `Selected box: #${selectedTarget.blockIndex + 1}`}
+                      </div>
+                      {selectedBlock && (
+                        <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                          Page: {selectedBlock.page ?? 1}
+                        </div>
+                      )}
+                      <textarea
+                        className="w-full h-52 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
+                        value={selectedContent}
+                        onChange={(e) => updateSelectedContent(e.target.value)}
+                        readOnly={!editSessionEnabled}
+                      />
+                    </div>
+                  )}
+
+                  {jsonError && (
+                    <div className="mt-3 text-xs text-red-300 bg-red-950/40 border border-red-900 p-3 rounded-xl">
+                      Invalid JSON: {jsonError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={formatJson}
+                    className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-zinc-400" />
+                    Validate and Format JSON
+                  </button>
+
+                  {editorFeedback && (
+                    <div
+                      className={`mt-3 text-xs p-3 rounded-xl border ${
+                        editorFeedback.type === 'error'
+                          ? 'text-red-200 bg-red-950/40 border-red-900'
+                          : editorFeedback.type === 'success'
+                          ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+                          : 'text-sky-200 bg-sky-950/40 border-sky-900'
+                      }`}
+                    >
+                      {editorFeedback.message}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             <div className="flex flex-col gap-3">
               <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4">
-                <div className="text-xs text-zinc-500 mb-2">Step 1</div>
+                <div className="text-xs text-zinc-500 mb-2">Export setup</div>
                 <button
                   onClick={chooseOutputFolder}
                   className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
@@ -943,7 +1315,7 @@ const App = () => {
                 className="w-full py-5 bg-white text-black rounded-3xl font-black text-lg hover:bg-zinc-200 transition-all disabled:bg-zinc-800 flex items-center justify-center gap-3"
               >
                 {loading ? <Loader2 className="animate-spin" /> : <Download className="w-5 h-5" />}
-                Step 2: Export JSON
+                Export JSON
               </button>
 
               <div className="text-xs text-zinc-400 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">

@@ -134,6 +134,12 @@ class SaveEditedPayload(BaseModel):
     document_name: str | None = None
 
 
+class UpgradePayload(BaseModel):
+    data: dict
+    mode: str = "both"
+    distance_threshold: float = 50.0
+
+
 PROCESSOR_CATALOG: list[dict[str, Any]] = [
     {
         "alias": "pdf2data",
@@ -775,6 +781,47 @@ async def save_edited_json(payload: SaveEditedPayload):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save edited JSON: {e}")
+
+
+@app.post("/api/actions/upgrade-json")
+async def upgrade_json_action(payload: UpgradePayload):
+    mode = str(payload.mode or "both").strip().lower()
+    if mode not in {"text", "figures", "both"}:
+        raise HTTPException(status_code=400, detail="Invalid upgrade mode. Use one of: text, figures, both.")
+
+    try:
+        from pdf2data.upgrade import Upgrader
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Upgrade dependency is unavailable in this environment.") from exc
+
+    try:
+        formatted = _format_as_content_json(dict(payload.data))
+        blocks = json.loads(json.dumps(formatted.get("blocks", [])))
+
+        upgrader = Upgrader(
+            correct_unicodes=mode in {"text", "both"},
+            merge_figures=mode in {"figures", "both"},
+            all_documents=False,
+            distance_threshold=float(payload.distance_threshold),
+        )
+
+        if upgrader.correct_unicodes:
+            blocks = upgrader.correct_unicodes_in_blocks(blocks)
+        if upgrader.merge_figures:
+            blocks = upgrader.merge_close_figures(blocks)
+
+        formatted["blocks"] = blocks
+        return {
+            "mode": mode,
+            "summary": {
+                "blocks_before": len(payload.data.get("blocks", [])) if isinstance(payload.data.get("blocks"), list) else 0,
+                "blocks_after": len(blocks),
+            },
+            "data": formatted,
+        }
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upgrade action failed: {exc}") from exc
 
 
 @app.get("/api/assets/{doc_id}/{asset_path:path}")
