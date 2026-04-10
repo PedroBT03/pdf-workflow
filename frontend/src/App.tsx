@@ -1,48 +1,36 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Upload, FileText, Loader2, Braces, CheckCircle2, Download, FolderOpen } from 'lucide-react';
+import {
+  API_BASE,
+  buildAssetUrl,
+  buildManifestUrl,
+  getCaptionBoxes,
+  getCellBoxesMatrix,
+  getTableDimensions,
+  isTableWithGrid,
+  sanitizePathSegments,
+  stripNativeImagesPrefix,
+  toCanonicalContentJson,
+} from './lib/pdfArtifacts';
+import {
+  UPGRADE_MODE_LABELS,
+  WORKFLOW_ACTION_LABELS,
+  type UpgradeMode,
+  type WorkflowActionId,
+  type WorkflowPathItem,
+} from './lib/workflow';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
-const API_BASE = 'http://localhost:8000';
-
 type ProcessorOption = {
   alias: string;
   label: string;
   enabled: boolean;
   reason?: string | null;
-};
-
-type SelectedTarget =
-  | { kind: 'block'; blockIndex: number }
-  | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
-  | { kind: 'tableCaption'; blockIndex: number };
-
-type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json';
-type UpgradeMode = 'text' | 'figures' | 'both';
-
-type WorkflowPathItem = {
-  id: string;
-  action: WorkflowActionId;
-  label: string;
-  status: 'done' | 'failed';
-  detail?: string;
-  timestamp: string;
-};
-
-const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
-  extract_json_from_pdf: 'Extract JSON from PDF',
-  edit_json: 'Visualize / Edit JSON',
-  upgrade_json: 'Upgrade JSON',
-};
-
-const UPGRADE_MODE_LABELS: Record<UpgradeMode, string> = {
-  text: 'Text only (unicode fixes)',
-  figures: 'Figures only (merge close figures)',
-  both: 'Text + Figures',
 };
 
 const DEFAULT_PROCESSORS: ProcessorOption[] = [
@@ -65,135 +53,12 @@ const PDF2DATA_TABLE_OPTIONS = [
   { value: 'microsoft/table-transformer-detection', label: 'microsoft/table-transformer-detection' },
 ];
 
-const buildAssetUrl = (docId: string, assetPath: string) => {
-  const encodedDocId = encodeURIComponent(docId);
-  const encodedPath = assetPath
-    .split('/')
-    .filter(Boolean)
-    .map((segment) => encodeURIComponent(segment))
-    .join('/');
+const RIGHT_RAIL_WIDTH_PX = 380;
 
-  return `${API_BASE}/api/assets/${encodedDocId}/${encodedPath}`;
-};
-
-const buildManifestUrl = (docId: string) => `${API_BASE}/api/assets-manifest/${encodeURIComponent(docId)}`;
-
-const stripNativeImagesPrefix = (assetPath: string) => {
-  const parts = assetPath.split('/').filter(Boolean);
-  const idx = parts.findIndex((part) => part.toLowerCase().endsWith('_images'));
-  if (idx >= 0 && idx + 1 < parts.length) {
-    return parts.slice(idx + 1).join('/');
-  }
-  return parts.length ? parts.slice(-1).join('/') : assetPath;
-};
-
-const sanitizePathSegments = (pathValue: string) =>
-  pathValue
-    .split('/')
-    .filter(Boolean)
-    .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
-
-type Box4 = [number, number, number, number];
-
-const isTableWithGrid = (block: any) =>
-  String(block?.type ?? '').toLowerCase() === 'table' && Array.isArray(block?.block);
-
-const toBox4 = (value: any): Box4 | null => {
-  if (!Array.isArray(value) || value.length !== 4) return null;
-  const nums = value.map((n) => Number(n));
-  if (nums.some((n) => Number.isNaN(n))) return null;
-  return [nums[0], nums[1], nums[2], nums[3]];
-};
-
-const getCellBoxesMatrix = (block: any, rowCount: number, colCount: number): Array<Array<Box4 | null>> => {
-  const empty = Array.from({ length: rowCount }).map(() => Array.from({ length: colCount }).map(() => null as Box4 | null));
-  const raw = block?.cell_boxes;
-  if (!Array.isArray(raw)) return empty;
-
-  // Preferred shape: cell_boxes[row][col] = [x1, y1, x2, y2]
-  if (raw.some((entry) => Array.isArray(entry) && Array.isArray(entry[0]))) {
-    for (let r = 0; r < rowCount; r += 1) {
-      const row = Array.isArray(raw[r]) ? raw[r] : [];
-      for (let c = 0; c < colCount; c += 1) {
-        empty[r][c] = toBox4(row[c]);
-      }
-    }
-    return empty;
-  }
-
-  // Legacy flat fallback: cell_boxes[idx] = [x1, y1, x2, y2]
-  for (let r = 0; r < rowCount; r += 1) {
-    for (let c = 0; c < colCount; c += 1) {
-      const idx = r * colCount + c;
-      empty[r][c] = toBox4(raw[idx]);
-    }
-  }
-  return empty;
-};
-
-const getCaptionBoxes = (block: any): Box4[] => {
-  const singular = toBox4(block?.caption_box);
-  if (singular) {
-    return [singular];
-  }
-
-  const raw = block?.caption_boxes;
-  if (!raw) return [];
-
-  if (Array.isArray(raw) && raw.length === 4 && !Array.isArray(raw[0])) {
-    const single = toBox4(raw);
-    return single ? [single] : [];
-  }
-
-  if (Array.isArray(raw)) {
-    return raw.map((entry) => toBox4(entry)).filter((b): b is Box4 => b !== null);
-  }
-
-  return [];
-};
-
-const getTableDimensions = (tableRows: any[]) => {
-  const rows = tableRows.length;
-  const cols = tableRows.reduce((max, row) => {
-    if (!Array.isArray(row)) return max;
-    return Math.max(max, row.length);
-  }, 0);
-  return {
-    rows,
-    cols: Math.max(1, cols),
-  };
-};
-
-const toCanonicalContentJson = (raw: any) => {
-  const metadata = raw && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : {};
-  const references = Array.isArray(raw?.references) ? raw.references : [];
-  const blocksInput = Array.isArray(raw?.blocks) ? raw.blocks : [];
-
-  const blocks = blocksInput
-    .filter((block: any) => Array.isArray(block?.box) && block.box.length === 4)
-    .map((block: any) => {
-      const canonical: any = {
-        type: String(block?.type ?? 'paragraph'),
-        content: String(block?.content ?? ''),
-        page: Number(block?.page ?? 1),
-        box: block.box.map((n: any) => Number(n)),
-      };
-
-      for (const optionalKey of ['filepath', 'number', 'caption', 'footnotes', 'block', 'cell_boxes', 'caption_box', 'caption_boxes', 'column_headers', 'row_indexes']) {
-        if (optionalKey in block) {
-          canonical[optionalKey] = block[optionalKey];
-        }
-      }
-
-      return canonical;
-    });
-
-  return {
-    metadata,
-    blocks,
-    references,
-  };
-};
+type SelectedTarget =
+  | { kind: 'block'; blockIndex: number }
+  | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
+  | { kind: 'tableCaption'; blockIndex: number };
 
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
@@ -202,6 +67,7 @@ const App = () => {
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
   const [selectedContent, setSelectedContent] = useState('');
   const [selectedAction, setSelectedAction] = useState<WorkflowActionId>('extract_json_from_pdf');
+  const [actionInProgress, setActionInProgress] = useState<WorkflowActionId | null>(null);
   const [upgradeMode, setUpgradeMode] = useState<UpgradeMode>('both');
   const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
   const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -220,10 +86,33 @@ const App = () => {
   const [processorOptions, setProcessorOptions] = useState<ProcessorOption[]>(DEFAULT_PROCESSORS);
   const [processorLoadWarning, setProcessorLoadWarning] = useState<string | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
+  const [pageRefreshTick, setPageRefreshTick] = useState(0);
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
   const [outputFolderHandle, setOutputFolderHandle] = useState<any | null>(null);
   const [outputFolderName, setOutputFolderName] = useState<string>('No folder selected');
+
+  useEffect(() => {
+    if (selectedAction !== 'edit_json') {
+      setEditSessionEnabled(false);
+      setSelectedTarget(null);
+      setSelectedContent('');
+      setActionInProgress((current) => (current === 'edit_json' ? null : current));
+    }
+  }, [selectedAction]);
+
+  useEffect(() => {
+    if (!workflowMessage) return;
+    if (workflowMessage.type === 'error') return;
+
+    const timeoutId = window.setTimeout(() => {
+      setWorkflowMessage((current) => (current === workflowMessage ? null : current));
+    }, 3600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [workflowMessage]);
 
   const showEditorFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
     setEditorFeedback({ type, message });
@@ -245,6 +134,7 @@ const App = () => {
     setSelectedTarget(null);
     setSelectedContent('');
     setSelectedAction('extract_json_from_pdf');
+    setActionInProgress(null);
     setUpgradeMode('both');
     setWorkflowPath([]);
     setWorkflowMessage(null);
@@ -288,6 +178,8 @@ const App = () => {
   const hasPdfArtifact = Boolean(pdfFile);
   const hasJsonArtifact = Boolean(parsedData && Array.isArray(parsedData.blocks));
   const hasUpgradedArtifact = Boolean(upgradedJson);
+  const isActionInProgress = actionInProgress !== null;
+  const showEditOverlays = editSessionEnabled && actionInProgress === 'edit_json';
 
   const canRunAction = (action: WorkflowActionId) => {
     if (action === 'extract_json_from_pdf') return hasPdfArtifact;
@@ -397,6 +289,7 @@ const App = () => {
     setJsonDraft('');
     setSelectedTarget(null);
     setSelectedContent('');
+    setActionInProgress(null);
     setEditorFeedback(null);
     setExportFeedback(null);
     setWorkflowMessage({ type: 'success', message: 'PDF imported. Choose an action from the workflow menu.' });
@@ -413,6 +306,11 @@ const App = () => {
   };
 
   const runExtractJsonAction = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return;
+    }
+
     if (!pdfFile) {
       const message = 'Import a PDF before running this action.';
       setWorkflowMessage({ type: 'error', message });
@@ -420,6 +318,7 @@ const App = () => {
       return;
     }
 
+    setActionInProgress('extract_json_from_pdf');
     setLoading(true);
 
     const formData = new FormData();
@@ -463,10 +362,16 @@ const App = () => {
       appendWorkflowPath('extract_json_from_pdf', 'failed', message);
     } finally {
       setLoading(false);
+      setActionInProgress(null);
     }
   };
 
   const runEditJsonAction = () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return;
+    }
+
     if (!hasJsonArtifact) {
       const message = 'Run Extract JSON first.';
       setWorkflowMessage({ type: 'error', message });
@@ -474,13 +379,26 @@ const App = () => {
       return;
     }
 
+    setActionInProgress('edit_json');
     setEditSessionEnabled(true);
+    // Force a fresh page load so overlay dimensions are recomputed immediately.
+    setPageSizes((prev) => {
+      if (!prev[currentPage]) return prev;
+      const next = { ...prev };
+      delete next[currentPage];
+      return next;
+    });
+    setPageRefreshTick((tick) => tick + 1);
     setActiveSidebarTab('editor');
-    setWorkflowMessage({ type: 'success', message: 'Edit mode enabled. Select a box to start editing.' });
-    appendWorkflowPath('edit_json', 'done', 'Editor enabled');
+    setWorkflowMessage({ type: 'info', message: 'Edit action in progress. Select a box, edit it, then click "Mark edits as done".' });
   };
 
   const runUpgradeJsonAction = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return;
+    }
+
     if (!hasJsonArtifact) {
       const message = 'Run Extract JSON first.';
       setWorkflowMessage({ type: 'error', message });
@@ -488,6 +406,7 @@ const App = () => {
       return;
     }
 
+    setActionInProgress('upgrade_json');
     setLoading(true);
     try {
       const response = await fetch(`${API_BASE}/api/actions/upgrade-json`, {
@@ -529,10 +448,16 @@ const App = () => {
       appendWorkflowPath('upgrade_json', 'failed', message);
     } finally {
       setLoading(false);
+      setActionInProgress(null);
     }
   };
 
   const runSelectedAction = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return;
+    }
+
     if (selectedAction === 'extract_json_from_pdf') {
       await runExtractJsonAction();
       return;
@@ -597,16 +522,16 @@ const App = () => {
         targetBlock.block[selectedTarget.row] = [];
       }
       targetBlock.block[selectedTarget.row][selectedTarget.col] = value;
-      setHasEditedJson(true);
-      setEditedJson(next);
+      setHasEditedJson(false);
+      setEditedJson(null);
       setJsonDraft(JSON.stringify(next, null, 2));
       return;
     }
 
     if (selectedTarget.kind === 'tableCaption') {
       targetBlock.caption = value;
-      setHasEditedJson(true);
-      setEditedJson(next);
+      setHasEditedJson(false);
+      setEditedJson(null);
       setJsonDraft(JSON.stringify(next, null, 2));
       return;
     }
@@ -615,9 +540,28 @@ const App = () => {
     if (Array.isArray(next.Text) && selectedTarget.blockIndex < next.Text.length) {
       next.Text[selectedTarget.blockIndex] = value;
     }
-    setHasEditedJson(true);
-    setEditedJson(next);
+    setHasEditedJson(false);
+    setEditedJson(null);
     setJsonDraft(JSON.stringify(next, null, 2));
+  };
+
+  const finalizeEditedJson = () => {
+    if (actionInProgress !== 'edit_json') return;
+    if (!parsedData) {
+      setWorkflowMessage({ type: 'error', message: 'Cannot finalize edits: JSON is invalid.' });
+      return;
+    }
+
+    const committed = JSON.parse(JSON.stringify(parsedData));
+    setEditedJson(committed);
+    setHasEditedJson(true);
+    setEditSessionEnabled(false);
+    setSelectedTarget(null);
+    setSelectedContent('');
+    setActionInProgress(null);
+    setWorkflowMessage({ type: 'success', message: 'Edits finalized. The edited JSON artifact is ready.' });
+    appendWorkflowPath('edit_json', 'done', 'Edits finalized');
+    setActiveSidebarTab('artifacts');
   };
 
   const exportJson = async () => {
@@ -806,6 +750,529 @@ const App = () => {
     setCurrentPage((p) => Math.min(numPages || 1, p + 1));
   };
 
+  const renderWorkflowRail = () => {
+    const workflowPreview = workflowPath.length
+      ? workflowPath
+      : [
+          {
+            id: 'empty',
+            action: selectedAction,
+            label: 'No actions executed yet',
+            status: 'done' as const,
+            detail: 'Run an action from the left panel.',
+            timestamp: '',
+          },
+        ];
+
+    return (
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-5 h-170 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm uppercase tracking-[0.2em] text-zinc-500 font-semibold">Workflow</h2>
+          <div className="text-[11px] text-zinc-500">Executed steps</div>
+        </div>
+        <div className="workflow-scroll flex-1 overflow-y-auto pr-1 space-y-3">
+          {workflowPreview.map((item, index) => (
+            <div key={item.id} className="flex flex-col items-stretch">
+              <div
+                className={`rounded-2xl border px-4 py-3 text-sm ${
+                  item.id === 'empty'
+                    ? 'border-zinc-700 bg-zinc-950/50 text-zinc-400'
+                    : item.status === 'done'
+                    ? 'border-emerald-900 bg-emerald-950/35 text-emerald-100'
+                    : 'border-red-900 bg-red-950/35 text-red-100'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-semibold">{item.label}</span>
+                  <span className="text-[11px] uppercase tracking-[0.18em] opacity-70">
+                    {item.id === 'empty' ? 'idle' : item.status}
+                  </span>
+                </div>
+                {item.detail && <div className="mt-2 text-xs text-inherit opacity-80">{item.detail}</div>}
+                {item.timestamp && <div className="mt-2 text-[11px] opacity-60">{item.timestamp}</div>}
+              </div>
+              {index < workflowPreview.length - 1 && (
+                <div className="flex items-center justify-center py-2 text-zinc-500">
+                  <div className="h-4 w-px bg-zinc-700" />
+                  <span className="mx-2 text-xs">→</span>
+                  <div className="h-4 w-px bg-zinc-700" />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderActionsColumn = () => (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-5 h-full flex flex-col gap-5">
+      <div>
+        <h2 className="text-sm uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-4">Actions</h2>
+
+        <div className="grid gap-3">
+          <div>
+            <label className="block text-xs text-zinc-400 mb-2">Action</label>
+            <select
+              value={selectedAction}
+              onChange={(e) => setSelectedAction(e.target.value as WorkflowActionId)}
+              disabled={isActionInProgress}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+            >
+              <option value="extract_json_from_pdf">Extract JSON from PDF</option>
+              <option value="edit_json">View / Edit JSON</option>
+              <option value="upgrade_json">Upgrade JSON</option>
+            </select>
+          </div>
+
+          {(selectedAction === 'extract_json_from_pdf' || selectedAction === 'upgrade_json') && (
+            <div>
+              <label className="block text-xs text-zinc-400 mb-2">Processor / model</label>
+              {selectedAction === 'extract_json_from_pdf' ? (
+                <>
+                  <select
+                    value={processor}
+                    onChange={(e) => setProcessor(e.target.value)}
+                    disabled={isActionInProgress}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                  >
+                    {processorOptions.map((item) => (
+                      <option key={item.alias} value={item.alias} disabled={!item.enabled}>
+                        {item.label}
+                        {!item.enabled ? ' (temporarily disabled)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {processorLoadWarning && <p className="mt-2 text-xs text-orange-400/90">{processorLoadWarning}</p>}
+
+                  {processor === 'pdf2data' && (
+                    <div className="mt-4 grid gap-3">
+                      <div>
+                        <label className="block text-xs text-zinc-400 mb-2">PDF2Data layout model</label>
+                        <select
+                          value={pdf2dataLayoutModel}
+                          onChange={(e) => setPdf2dataLayoutModel(e.target.value)}
+                          disabled={isActionInProgress}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                        >
+                          {PDF2DATA_LAYOUT_OPTIONS.map((item) => (
+                            <option key={item.value} value={item.value}>{item.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-zinc-400 mb-2">PDF2Data table model</label>
+                        <select
+                          value={pdf2dataTableModel}
+                          onChange={(e) => setPdf2dataTableModel(e.target.value)}
+                          disabled={isActionInProgress}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                        >
+                          {PDF2DATA_TABLE_OPTIONS.map((item) => (
+                            <option key={item.value} value={item.value}>{item.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <select
+                  value={upgradeMode}
+                  onChange={(e) => setUpgradeMode(e.target.value as UpgradeMode)}
+                  disabled={isActionInProgress}
+                  className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                >
+                  <option value="both">{UPGRADE_MODE_LABELS.both}</option>
+                  <option value="text">{UPGRADE_MODE_LABELS.text}</option>
+                  <option value="figures">{UPGRADE_MODE_LABELS.figures}</option>
+                </select>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={runSelectedAction}
+            disabled={loading || isActionInProgress || !canRunAction(selectedAction)}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
+          >
+            {actionInProgress === 'edit_json' ? 'Edit action in progress' : loading ? 'Running action...' : 'Run action'}
+          </button>
+        </div>
+
+        {workflowMessage && (
+          <div
+            className={`mt-4 text-xs p-3 rounded-xl border ${
+              workflowMessage.type === 'error'
+                ? 'text-red-200 bg-red-950/40 border-red-900'
+                : workflowMessage.type === 'success'
+                ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+                : 'text-sky-200 bg-sky-950/40 border-sky-900'
+            }`}
+          >
+            {workflowMessage.message}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-1">
+        {selectedAction === 'edit_json' && editSessionEnabled ? (
+          <div className="bg-zinc-950/45 border border-zinc-800 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">JSON editor</div>
+                <div className="text-[11px] text-zinc-400 mt-1">Only active for View / Edit JSON</div>
+              </div>
+              <div className="text-[11px] text-zinc-500">{editSessionEnabled ? 'editing' : 'preview'}</div>
+            </div>
+
+            <div className="text-xs text-zinc-400 mb-3 bg-zinc-800/50 p-3 rounded-xl">
+              {editSessionEnabled
+                ? 'Click a box on the PDF to edit only that box metadata.'
+                : 'Run "View / Edit JSON" to enable box selection and editing.'}
+            </div>
+
+            {selectedTarget === null ? (
+              <div className="h-36 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
+                No box selected.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                  {selectedTarget.kind === 'tableCell'
+                    ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
+                    : selectedTarget.kind === 'tableCaption'
+                    ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
+                    : `Selected box: #${selectedTarget.blockIndex + 1}`}
+                </div>
+                {selectedBlock && (
+                  <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
+                    Page: {selectedBlock.page ?? 1}
+                  </div>
+                )}
+                <textarea
+                  className="w-full h-52 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
+                  value={selectedContent}
+                  onChange={(e) => updateSelectedContent(e.target.value)}
+                  readOnly={!editSessionEnabled}
+                />
+              </div>
+            )}
+
+            {jsonError && (
+              <div className="mt-3 text-xs text-red-300 bg-red-950/40 border border-red-900 p-3 rounded-xl">
+                Invalid JSON: {jsonError}
+              </div>
+            )}
+
+            <button
+              onClick={formatJson}
+              className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+            >
+              <CheckCircle2 className="w-4 h-4 text-zinc-400" />
+              Validate and Format Block
+            </button>
+
+            <button
+              onClick={finalizeEditedJson}
+              disabled={!editSessionEnabled || actionInProgress !== 'edit_json'}
+              className="mt-3 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-2xl font-semibold transition-all"
+            >
+              Mark edits as done
+            </button>
+
+            {editorFeedback && (
+              <div
+                className={`mt-3 text-xs p-3 rounded-xl border ${
+                  editorFeedback.type === 'error'
+                    ? 'text-red-200 bg-red-950/40 border-red-900'
+                    : editorFeedback.type === 'success'
+                    ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+                    : 'text-sky-200 bg-sky-950/40 border-sky-900'
+                }`}
+              >
+                {editorFeedback.message}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="mt-auto text-xs text-zinc-400 bg-zinc-800/40 p-3 rounded-xl border border-zinc-700">
+        Only one workflow action can run at a time. Finish the current action before starting the next.
+      </div>
+    </div>
+  );
+
+  const renderPdfViewerPanel = () => {
+    if (!pdfFile) {
+      return (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-6 h-full flex items-center justify-center text-zinc-500 text-sm text-center">
+          Import a PDF to start the workflow.
+        </div>
+      );
+    }
+
+    return (
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-4 h-full flex flex-col min-h-170">
+        <div className="flex items-center justify-between mb-3 px-2">
+          <div>
+            <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">PDF preview</div>
+            <div className="text-xs text-zinc-400 mt-1">{editSessionEnabled ? 'Editing enabled' : 'Read/selection mode'}</div>
+          </div>
+          <div className="text-xs text-zinc-500">Page {currentPage} / {numPages || 1}</div>
+        </div>
+
+        <div className="flex-1 flex flex-col gap-4 min-h-0">
+          <div className="flex-1 min-h-120 overflow-auto rounded-2xl border border-zinc-800 bg-zinc-950/50">
+            <Document file={pdfFile} onLoadSuccess={onDocumentLoadSuccess}>
+              <div className="relative">
+                <Page
+                  key={`pdf-page-${currentPage}-${pageRefreshTick}`}
+                  pageNumber={currentPage}
+                  scale={1.5}
+                  onLoadSuccess={(page) => onPageLoadSuccess(page.pageNumber, page)}
+                  onLoadError={() => null}
+                  renderTextLayer={false}
+                  renderAnnotationLayer={false}
+                />
+
+                {showEditOverlays && pageSizes[currentPage] && (
+                  <div
+                    className="absolute top-0 left-0 pointer-events-none"
+                    style={{ width: pageSizes[currentPage].width, height: pageSizes[currentPage].height }}
+                  >
+                    {currentPageBlocks.map(({ block, index }: { block: any; index: number }) => {
+                      const box = block?.box;
+                      if (!Array.isArray(box) || box.length !== 4) return null;
+
+                      const [x1, y1, x2, y2] = box;
+                      const left = x1 * pageSizes[currentPage].scale;
+                      const top = y1 * pageSizes[currentPage].scale;
+                      const width = (x2 - x1) * pageSizes[currentPage].scale;
+                      const height = (y2 - y1) * pageSizes[currentPage].scale;
+                      const isSelectedBlock = selectedTarget?.kind === 'block' && selectedTarget.blockIndex === index;
+
+                      if (isTableWithGrid(block)) {
+                        const tableRows = Array.isArray(block.block) ? block.block : [];
+                        const { rows, cols } = getTableDimensions(tableRows);
+                        const safeRows = Math.max(1, rows);
+                        const cellBoxesMatrix = getCellBoxesMatrix(block, safeRows, cols);
+                        const hasEditableCells = cellBoxesMatrix.some((row) => row.some((cell) => cell !== null));
+
+                        const captionBoxes = getCaptionBoxes(block);
+                        const hasEditableCaption = captionBoxes.length > 0;
+                        const isTableEditable = hasEditableCells || hasEditableCaption;
+
+                        if (!isTableEditable) {
+                          return (
+                            <div
+                              key={`${index}-not-editable`}
+                              className="absolute pointer-events-none border border-rose-400/70 bg-rose-500/10 text-rose-200 text-[11px] font-medium px-2 py-1"
+                              style={{ left, top, width, height: Math.max(20, Math.min(32, height)) }}
+                              title="Not possible to edit this table"
+                            >
+                              Not possible to edit this table
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <React.Fragment key={index}>
+                            {Array.from({ length: safeRows }).map((_, rowIdx) =>
+                              Array.from({ length: cols }).map((__, colIdx) => {
+                                const cellSelected =
+                                  selectedTarget?.kind === 'tableCell' &&
+                                  selectedTarget.blockIndex === index &&
+                                  selectedTarget.row === rowIdx &&
+                                  selectedTarget.col === colIdx;
+
+                                const precise = cellBoxesMatrix[rowIdx][colIdx];
+                                if (!precise) return null;
+
+                                const [cx1, cy1, cx2, cy2] = precise;
+
+                                return (
+                                  <div
+                                    key={`${index}-cell-${rowIdx}-${colIdx}`}
+                                    className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                                      editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                    } ${
+                                      cellSelected
+                                        ? 'border-2 border-emerald-300 bg-emerald-300/20'
+                                        : 'border border-emerald-400/80 bg-emerald-400/10 hover:bg-emerald-400/20'
+                                    }`}
+                                    style={{
+                                      left: cx1 * pageSizes[currentPage].scale,
+                                      top: cy1 * pageSizes[currentPage].scale,
+                                      width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
+                                      height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
+                                    }}
+                                    title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
+                                    onClick={() => {
+                                      if (!editSessionEnabled) {
+                                        setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                                        return;
+                                      }
+                                      setSelectedTarget({ kind: 'tableCell', blockIndex: index, row: rowIdx, col: colIdx });
+                                    }}
+                                  />
+                                );
+                              })
+                            )}
+
+                            {captionBoxes.map((captionBox, captionIdx) => {
+                              const [cx1, cy1, cx2, cy2] = captionBox;
+                              return (
+                                <div
+                                  key={`${index}-caption-${captionIdx}`}
+                                  className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                                    editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                  } ${
+                                    selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index
+                                      ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
+                                      : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
+                                  }`}
+                                  style={{
+                                    left: cx1 * pageSizes[currentPage].scale,
+                                    top: cy1 * pageSizes[currentPage].scale,
+                                    width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
+                                    height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
+                                  }}
+                                  title="Table caption"
+                                  onClick={() => {
+                                    if (!editSessionEnabled) {
+                                      setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                                      return;
+                                    }
+                                    setSelectedTarget({ kind: 'tableCaption', blockIndex: index });
+                                  }}
+                                />
+                              );
+                            })}
+                          </React.Fragment>
+                        );
+                      }
+
+                      return (
+                        <div
+                          key={index}
+                          className={`absolute overflow-hidden pointer-events-auto transition-colors ${
+                            editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                          } ${
+                            isSelectedBlock
+                              ? 'border-2 border-amber-300 bg-amber-300/20'
+                              : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
+                          }`}
+                          style={{ left, top, width, height }}
+                          title={block?.content || `Block ${index}`}
+                          onClick={() => {
+                            if (!editSessionEnabled) {
+                              setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                              return;
+                            }
+                            setSelectedTarget({ kind: 'block', blockIndex: index });
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </Document>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 p-3 border border-zinc-800 rounded-2xl bg-zinc-950/60">
+            <button
+              onClick={goToPreviousPage}
+              disabled={currentPage <= 1}
+              className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Previous
+            </button>
+            <div className="text-sm text-zinc-400">
+              Page {currentPage} / {numPages || 1}
+            </div>
+            <button
+              onClick={goToNextPage}
+              disabled={currentPage >= (numPages || 1)}
+              className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderArtifactsBar = () => (
+    <div className="w-full mb-3">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-4 flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-2 text-sm text-zinc-300">
+          <Braces className="w-4 h-4 text-blue-500" />
+          <span className="text-zinc-500 uppercase tracking-[0.2em] text-[11px]">Artifacts</span>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <div className={`px-3 py-2 rounded-xl border ${hasPdfArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            PDF: {hasPdfArtifact ? 'available' : 'missing'}
+          </div>
+          <div className={`px-3 py-2 rounded-xl border ${hasJsonArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            JSON: {hasJsonArtifact ? 'available' : 'missing'}
+          </div>
+          <div className={`px-3 py-2 rounded-xl border ${hasEditedJson ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            Edited: {hasEditedJson ? 'available' : 'missing'}
+          </div>
+          <div className={`px-3 py-2 rounded-xl border ${hasUpgradedArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            Upgraded: {hasUpgradedArtifact ? 'available' : 'missing'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderExportCard = () => (
+    <div style={{ width: RIGHT_RAIL_WIDTH_PX }} className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-4">
+      <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-3">Export</div>
+      <button
+        onClick={chooseOutputFolder}
+        className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+      >
+        <FolderOpen className="w-4 h-4" /> Choose Output Folder
+      </button>
+      <div
+        className={`mt-3 text-xs rounded-xl px-3 py-2 border ${
+          outputFolderHandle
+            ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900'
+            : 'text-zinc-400 bg-zinc-950/40 border-zinc-700'
+        }`}
+      >
+        {outputFolderHandle ? `Selected: ${outputFolderName}` : 'No folder selected yet'}
+      </div>
+      <button
+        onClick={exportJson}
+        disabled={!parsedData || !outputFolderHandle}
+        className="mt-3 w-full py-3 bg-white text-black rounded-2xl font-black text-base hover:bg-zinc-200 transition-all disabled:bg-zinc-800 disabled:text-zinc-500 flex items-center justify-center gap-3"
+      >
+        <Download className="w-5 h-5" />
+        Export JSON
+      </button>
+      {exportFeedback && (
+        <div
+          className={`mt-3 text-xs p-3 rounded-xl border ${
+            exportFeedback.type === 'error'
+              ? 'text-red-200 bg-red-950/40 border-red-900'
+              : exportFeedback.type === 'success'
+              ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+              : 'text-sky-200 bg-sky-950/40 border-sky-900'
+          }`}
+        >
+          {exportFeedback.message}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center p-6 font-sans">
       {!pdfFile && (
@@ -814,7 +1281,7 @@ const App = () => {
             <FileText className="w-10 h-10 text-blue-500" />
           </div>
           <h1 className="text-4xl font-black mb-2 tracking-tighter">PDF METADATA EDITOR</h1>
-          <p className="text-zinc-500 mb-10 text-lg">PDF preview + metadata JSON editing/export</p>
+          <p className="text-zinc-500 mb-10 text-lg">Choose a PDF to start the workflow.</p>
 
           <label className="cursor-pointer group">
             <div className="bg-blue-600 group-hover:bg-blue-700 text-white font-bold py-4 px-8 rounded-2xl transition-all shadow-lg shadow-blue-900/20 flex items-center justify-center gap-3">
@@ -822,54 +1289,6 @@ const App = () => {
             </div>
             <input type="file" onChange={handleImportPdf} className="hidden" accept=".pdf" />
           </label>
-
-          <div className="mt-5 text-left">
-            <label className="block text-xs text-zinc-400 mb-2">Processor</label>
-            <select
-              value={processor}
-              onChange={(e) => setProcessor(e.target.value)}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-            >
-              {processorOptions.map((item) => (
-                <option key={item.alias} value={item.alias} disabled={!item.enabled}>
-                  {item.label}
-                  {!item.enabled ? ' (temporarily disabled)' : ''}
-                </option>
-              ))}
-            </select>
-            {processorLoadWarning && (
-              <p className="mt-2 text-xs text-orange-400/90">{processorLoadWarning}</p>
-            )}
-
-            {processor === 'pdf2data' && (
-              <div className="mt-4 grid gap-3">
-                <div>
-                  <label className="block text-xs text-zinc-400 mb-2">PDF2Data layout model</label>
-                  <select
-                    value={pdf2dataLayoutModel}
-                    onChange={(e) => setPdf2dataLayoutModel(e.target.value)}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {PDF2DATA_LAYOUT_OPTIONS.map((item) => (
-                      <option key={item.value} value={item.value}>{item.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-zinc-400 mb-2">PDF2Data table model</label>
-                  <select
-                    value={pdf2dataTableModel}
-                    onChange={(e) => setPdf2dataTableModel(e.target.value)}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                  >
-                    {PDF2DATA_TABLE_OPTIONS.map((item) => (
-                      <option key={item.value} value={item.value}>{item.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
-          </div>
 
           {loading && (
             <div className="mt-10 flex items-center justify-center gap-3 text-blue-400 font-mono text-sm animate-pulse">
@@ -880,466 +1299,22 @@ const App = () => {
       )}
 
       {pdfFile && (
-        <div className="flex gap-10 w-full max-w-400 justify-center items-start">
-          <div className="relative bg-zinc-900 rounded-2xl shadow-2xl border-2 border-zinc-800 overflow-hidden">
-            {pdfFile && (
-              <>
-                <Document file={pdfFile} onLoadSuccess={onDocumentLoadSuccess}>
-                  <div className="relative">
-                    <Page
-                      pageNumber={currentPage}
-                      scale={1.5}
-                      onLoadSuccess={(page) => onPageLoadSuccess(currentPage, page)}
-                      onLoadError={() => null}
-                      renderTextLayer={false}
-                      renderAnnotationLayer={false}
-                    />
+        <div className="w-full max-w-420 grid gap-6" style={{ gridTemplateColumns: `minmax(0, 1fr) ${RIGHT_RAIL_WIDTH_PX}px` }}>
+          <div className="min-w-0">
+            {renderArtifactsBar()}
 
-                    {pageSizes[currentPage] && (
-                      <div
-                        className="absolute top-0 left-0 pointer-events-none"
-                        style={{
-                          width: pageSizes[currentPage].width,
-                          height: pageSizes[currentPage].height,
-                        }}
-                      >
-                        {currentPageBlocks.map(({ block, index }: { block: any; index: number }) => {
-                          const box = block?.box;
-                          if (!Array.isArray(box) || box.length !== 4) {
-                            return null;
-                          }
+            <div className="grid gap-6" style={{ gridTemplateColumns: '360px minmax(0, 1fr)' }}>
+              <div>{renderActionsColumn()}</div>
 
-                          const [x1, y1, x2, y2] = box;
-                          const left = x1 * pageSizes[currentPage].scale;
-                          const top = y1 * pageSizes[currentPage].scale;
-                          const width = (x2 - x1) * pageSizes[currentPage].scale;
-                          const height = (y2 - y1) * pageSizes[currentPage].scale;
-                          const isSelectedBlock =
-                            selectedTarget?.kind === 'block' && selectedTarget.blockIndex === index;
-
-                          if (isTableWithGrid(block)) {
-                            const tableRows = Array.isArray(block.block) ? block.block : [];
-                            const { rows, cols } = getTableDimensions(tableRows);
-                            const safeRows = Math.max(1, rows);
-                            const cellBoxesMatrix = getCellBoxesMatrix(block, safeRows, cols);
-                            const hasEditableCells = cellBoxesMatrix.some((row) => row.some((cell) => cell !== null));
-
-                            const captionBoxes = getCaptionBoxes(block);
-                            const hasEditableCaption = captionBoxes.length > 0;
-                            const isTableEditable = hasEditableCells || hasEditableCaption;
-
-                            if (!isTableEditable) {
-                              return (
-                                <div
-                                  key={`${index}-not-editable`}
-                                  className="absolute pointer-events-none border border-rose-400/70 bg-rose-500/10 text-rose-200 text-[11px] font-medium px-2 py-1"
-                                  style={{ left, top, width, height: Math.max(20, Math.min(32, height)) }}
-                                  title="Not possible to edit this table"
-                                >
-                                  Not possible to edit this table
-                                </div>
-                              );
-                            }
-
-                            return (
-                              <React.Fragment key={index}>
-                                {Array.from({ length: safeRows }).map((_, rowIdx) =>
-                                  Array.from({ length: cols }).map((__, colIdx) => {
-                                    const cellSelected =
-                                      selectedTarget?.kind === 'tableCell' &&
-                                      selectedTarget.blockIndex === index &&
-                                      selectedTarget.row === rowIdx &&
-                                      selectedTarget.col === colIdx;
-
-                                    const precise = cellBoxesMatrix[rowIdx][colIdx];
-                                    if (!precise) {
-                                      return null;
-                                    }
-
-                                    const [cx1, cy1, cx2, cy2] = precise;
-
-                                    return (
-                                      <div
-                                        key={`${index}-cell-${rowIdx}-${colIdx}`}
-                                        className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                                          editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
-                                        } ${
-                                          cellSelected
-                                            ? 'border-2 border-emerald-300 bg-emerald-300/20'
-                                            : 'border border-emerald-400/80 bg-emerald-400/10 hover:bg-emerald-400/20'
-                                        }`}
-                                        style={{
-                                          left: cx1 * pageSizes[currentPage].scale,
-                                          top: cy1 * pageSizes[currentPage].scale,
-                                          width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
-                                          height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
-                                        }}
-                                        title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
-                                        onClick={() => {
-                                          if (!editSessionEnabled) {
-                                            setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
-                                            return;
-                                          }
-                                          setSelectedTarget({
-                                            kind: 'tableCell',
-                                            blockIndex: index,
-                                            row: rowIdx,
-                                            col: colIdx,
-                                          });
-                                        }}
-                                      />
-                                    );
-                                  })
-                                )}
-
-                                {captionBoxes.map((captionBox, captionIdx) => {
-                                  const [cx1, cy1, cx2, cy2] = captionBox;
-                                  return (
-                                    <div
-                                      key={`${index}-caption-${captionIdx}`}
-                                      className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                                        editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
-                                      } ${
-                                        selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index
-                                          ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
-                                          : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
-                                      }`}
-                                      style={{
-                                        left: cx1 * pageSizes[currentPage].scale,
-                                        top: cy1 * pageSizes[currentPage].scale,
-                                        width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
-                                        height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
-                                      }}
-                                      title="Table caption"
-                                      onClick={() => {
-                                        if (!editSessionEnabled) {
-                                          setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
-                                          return;
-                                        }
-                                        setSelectedTarget({ kind: 'tableCaption', blockIndex: index });
-                                      }}
-                                    />
-                                  );
-                                })}
-                              </React.Fragment>
-                            );
-                          }
-
-                          return (
-                            <div
-                              key={index}
-                              className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                                editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
-                              } ${
-                                isSelectedBlock
-                                  ? 'border-2 border-amber-300 bg-amber-300/20'
-                                  : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
-                              }`}
-                              style={{ left, top, width, height }}
-                              title={block?.content || `Block ${index}`}
-                              onClick={() => {
-                                if (!editSessionEnabled) {
-                                  setWorkflowMessage({ type: 'info', message: 'Run "Visualize / Edit JSON" to enable editing.' });
-                                  return;
-                                }
-                                setSelectedTarget({ kind: 'block', blockIndex: index });
-                              }}
-                            />
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </Document>
-
-                <div className="flex items-center justify-between gap-3 p-3 border-t border-zinc-800 bg-zinc-950/60">
-                  <button
-                    onClick={goToPreviousPage}
-                    disabled={currentPage <= 1}
-                    className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Previous
-                  </button>
-                  <div className="text-sm text-zinc-400">
-                    Page {currentPage} / {numPages || 1}
-                  </div>
-                  <button
-                    onClick={goToNextPage}
-                    disabled={currentPage >= (numPages || 1)}
-                    className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Next
-                  </button>
-                </div>
-              </>
-            )}
+              <div>
+                {renderPdfViewerPanel()}
+              </div>
+            </div>
           </div>
 
-          {/* Workflow sidebar */}
-          <div className="w-96 flex flex-col gap-6 sticky top-6">
-            <div className="bg-zinc-900 p-6 rounded-3xl border border-zinc-800 shadow-xl">
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <div className="text-xs text-zinc-500 truncate" title={sourceFilename}>
-                  PDF: <span className="text-zinc-300">{sourceFilename}</span>
-                </div>
-                <button
-                  onClick={confirmAndResetWorkflow}
-                  className="px-3 py-2 text-xs rounded-xl bg-rose-900/50 border border-rose-700/80 hover:bg-rose-800/60 text-rose-100 transition-colors"
-                >
-                  Cancel and choose another PDF
-                </button>
-              </div>
-
-              <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
-                <Braces className="w-5 h-5 text-blue-500" /> Workflow
-              </h2>
-
-              <div className="grid gap-3">
-                <div>
-                  <label className="block text-xs text-zinc-400 mb-2">Select action</label>
-                  <select
-                    value={selectedAction}
-                    onChange={(e) => setSelectedAction(e.target.value as WorkflowActionId)}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                  >
-                    <option value="extract_json_from_pdf">Extract JSON from PDF</option>
-                    <option value="edit_json">Visualize / Edit JSON</option>
-                    <option value="upgrade_json">Upgrade JSON</option>
-                  </select>
-                </div>
-
-                {selectedAction === 'upgrade_json' && (
-                  <div>
-                    <label className="block text-xs text-zinc-400 mb-2">Upgrade mode</label>
-                    <select
-                      value={upgradeMode}
-                      onChange={(e) => setUpgradeMode(e.target.value as UpgradeMode)}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                    >
-                      <option value="both">{UPGRADE_MODE_LABELS.both}</option>
-                      <option value="text">{UPGRADE_MODE_LABELS.text}</option>
-                      <option value="figures">{UPGRADE_MODE_LABELS.figures}</option>
-                    </select>
-                  </div>
-                )}
-
-                <button
-                  onClick={runSelectedAction}
-                  disabled={loading || !canRunAction(selectedAction)}
-                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
-                >
-                  {loading ? 'Running action...' : 'Run action'}
-                </button>
-              </div>
-
-              {workflowMessage && (
-                <div
-                  className={`mt-3 text-xs p-3 rounded-xl border ${
-                    workflowMessage.type === 'error'
-                      ? 'text-red-200 bg-red-950/40 border-red-900'
-                      : workflowMessage.type === 'success'
-                      ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
-                      : 'text-sky-200 bg-sky-950/40 border-sky-900'
-                  }`}
-                >
-                  {workflowMessage.message}
-                </div>
-              )}
-
-              <div className="mt-4 text-xs text-zinc-400">Workflow path</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {workflowPath.length === 0 ? (
-                  <div className="text-xs text-zinc-500">No actions executed yet.</div>
-                ) : (
-                  workflowPath.map((item) => (
-                    <div
-                      key={item.id}
-                      className={`px-2 py-1 rounded-lg border text-[11px] ${
-                        item.status === 'done'
-                          ? 'border-emerald-900 bg-emerald-950/40 text-emerald-200'
-                          : 'border-red-900 bg-red-950/40 text-red-200'
-                      }`}
-                      title={item.detail || item.label}
-                    >
-                      {item.label} · {item.timestamp}
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div className="mt-5 grid grid-cols-3 gap-2">
-                <button
-                  onClick={() => setActiveSidebarTab('workflow')}
-                  className={`py-2 text-xs rounded-lg border ${
-                    activeSidebarTab === 'workflow'
-                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
-                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                  }`}
-                >
-                  Workflow
-                </button>
-                <button
-                  onClick={() => setActiveSidebarTab('artifacts')}
-                  className={`py-2 text-xs rounded-lg border ${
-                    activeSidebarTab === 'artifacts'
-                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
-                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                  }`}
-                >
-                  Artifacts
-                </button>
-                <button
-                  onClick={() => setActiveSidebarTab('editor')}
-                  className={`py-2 text-xs rounded-lg border ${
-                    activeSidebarTab === 'editor'
-                      ? 'bg-zinc-200 text-zinc-900 border-zinc-200'
-                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                  }`}
-                >
-                  Editor
-                </button>
-              </div>
-
-              {activeSidebarTab === 'workflow' && (
-                <div className="mt-4 text-xs text-zinc-400 bg-zinc-800/40 p-3 rounded-xl border border-zinc-700">
-                  Action execution order is free. Preconditions are validated before each action runs.
-                </div>
-              )}
-
-              {activeSidebarTab === 'artifacts' && (
-                <div className="mt-4 grid gap-2 text-xs">
-                  <div className={`p-3 rounded-xl border ${hasPdfArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
-                    PDF artifact: {hasPdfArtifact ? 'available' : 'missing'}
-                  </div>
-                  <div className={`p-3 rounded-xl border ${hasJsonArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
-                    JSON artifact: {hasJsonArtifact ? 'available' : 'missing'}
-                  </div>
-                  <div className={`p-3 rounded-xl border ${hasEditedJson ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
-                    Edited JSON artifact: {hasEditedJson ? 'available' : 'missing'}
-                  </div>
-                  <div className={`p-3 rounded-xl border ${hasUpgradedArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
-                    Upgraded JSON artifact: {hasUpgradedArtifact ? 'available' : 'missing'}
-                  </div>
-                </div>
-              )}
-
-              {activeSidebarTab === 'editor' && (
-                <div className="mt-4">
-                  <div className="text-xs text-zinc-400 mb-3 bg-zinc-800/50 p-3 rounded-xl">
-                    {editSessionEnabled
-                      ? 'Click a box on the PDF to edit only that box metadata.'
-                      : 'Run "Visualize / Edit JSON" to enable box selection and editing.'}
-                  </div>
-
-                  {selectedTarget === null ? (
-                    <div className="h-48 flex items-center justify-center text-sm text-zinc-500 border border-dashed border-zinc-700 rounded-2xl px-6 text-center">
-                      No box selected.
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-3">
-                      <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
-                        {selectedTarget.kind === 'tableCell'
-                          ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
-                          : selectedTarget.kind === 'tableCaption'
-                          ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
-                          : `Selected box: #${selectedTarget.blockIndex + 1}`}
-                      </div>
-                      {selectedBlock && (
-                        <div className="text-xs text-zinc-500 bg-zinc-800/40 p-3 rounded-xl">
-                          Page: {selectedBlock.page ?? 1}
-                        </div>
-                      )}
-                      <textarea
-                        className="w-full h-52 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
-                        value={selectedContent}
-                        onChange={(e) => updateSelectedContent(e.target.value)}
-                        readOnly={!editSessionEnabled}
-                      />
-                    </div>
-                  )}
-
-                  {jsonError && (
-                    <div className="mt-3 text-xs text-red-300 bg-red-950/40 border border-red-900 p-3 rounded-xl">
-                      Invalid JSON: {jsonError}
-                    </div>
-                  )}
-
-                  <button
-                    onClick={formatJson}
-                    className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
-                  >
-                    <CheckCircle2 className="w-4 h-4 text-zinc-400" />
-                    Validate and Format JSON
-                  </button>
-
-                  {editorFeedback && (
-                    <div
-                      className={`mt-3 text-xs p-3 rounded-xl border ${
-                        editorFeedback.type === 'error'
-                          ? 'text-red-200 bg-red-950/40 border-red-900'
-                          : editorFeedback.type === 'success'
-                          ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
-                          : 'text-sky-200 bg-sky-950/40 border-sky-900'
-                      }`}
-                    >
-                      {editorFeedback.message}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-3">
-              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4">
-                <div className="text-xs text-zinc-500 mb-2">Export setup</div>
-                <button
-                  onClick={chooseOutputFolder}
-                  className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
-                >
-                  <FolderOpen className="w-4 h-4" /> Choose Output Folder
-                </button>
-                <div
-                  className={`mt-3 text-xs rounded-xl px-3 py-2 border ${
-                    outputFolderHandle
-                      ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900'
-                      : 'text-zinc-400 bg-zinc-950/40 border-zinc-700'
-                  }`}
-                >
-                  {outputFolderHandle ? `Selected: ${outputFolderName}` : 'No folder selected yet'}
-                </div>
-              </div>
-
-              <button
-                onClick={exportJson}
-                disabled={loading || !parsedData || !outputFolderHandle}
-                className="w-full py-5 bg-white text-black rounded-3xl font-black text-lg hover:bg-zinc-200 transition-all disabled:bg-zinc-800 flex items-center justify-center gap-3"
-              >
-                {loading ? <Loader2 className="animate-spin" /> : <Download className="w-5 h-5" />}
-                Export JSON
-              </button>
-
-              <div className="text-xs text-zinc-400 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
-                Export creates <code>{'{nome_do_pdf}'}</code> with <code>{'{nome_do_pdf}'}_content.json</code> and <code>{'{nome_do_pdf}'}_images</code>.
-              </div>
-
-              {exportFeedback && (
-                <div
-                  className={`text-xs p-3 rounded-xl border ${
-                    exportFeedback.type === 'error'
-                      ? 'text-red-200 bg-red-950/40 border-red-900'
-                      : exportFeedback.type === 'success'
-                      ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
-                      : 'text-sky-200 bg-sky-950/40 border-sky-900'
-                  }`}
-                >
-                  {exportFeedback.message}
-                </div>
-              )}
-
-              <div className="text-xs text-zinc-500 bg-zinc-900/60 p-3 rounded-xl border border-zinc-800">
-                Blocks in preview: {previewBlocks.length} | Pages: {numPages || 1}
-              </div>
-            </div>
+          <div className="flex flex-col gap-6">
+            {renderExportCard()}
+            <div className="flex-1">{renderWorkflowRail()}</div>
           </div>
         </div>
       )}

@@ -15,10 +15,37 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import fitz
 
-app = FastAPI()
+from core.content_json import (
+    ASSET_CACHE_ROOT,
+    find_first_content_json,
+    format_as_content_json,
+    list_cached_assets,
+    normalize_layout_label,
+    persist_extracted_assets,
+    read_native_content_envelope,
+    safe_float,
+    safe_int,
+)
 
-ASSET_CACHE_ROOT = Path(tempfile.gettempdir()) / "pdfwf_assets"
-ASSET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+# Backward-compatible aliases kept for existing tests and call sites.
+_normalize_layout_label = normalize_layout_label
+_format_as_content_json = format_as_content_json
+_persist_extracted_assets = persist_extracted_assets
+_list_cached_assets = list_cached_assets
+_find_first_content_json = find_first_content_json
+_read_native_content_envelope = read_native_content_envelope
+_safe_int = safe_int
+_safe_float = safe_float
+
+
+def _persist_extracted_assets(file_id: str, output_tmp: str) -> int:
+    return persist_extracted_assets(file_id=file_id, output_tmp=output_tmp, asset_root=ASSET_CACHE_ROOT)
+
+
+def _list_cached_assets(doc_id: str) -> list[str]:
+    return list_cached_assets(doc_id=doc_id, asset_root=ASSET_CACHE_ROOT)
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,105 +54,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def _normalize_layout_label(raw_label: str) -> str:
-    label = raw_label.strip().lower()
-    if label in {"text", "paragraph"}:
-        return "paragraph"
-    if label in {"title", "header", "heading", "section_header"}:
-        return "section_header"
-    if label == "figure":
-        return "Figure"
-    if label == "table":
-        return "Table"
-    if label == "equation":
-        return "Equation"
-    return raw_label.strip() or "paragraph"
-
-
-def _format_as_content_json(data: dict) -> dict:
-    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    references = data.get("references") if isinstance(data.get("references"), list) else []
-    raw_blocks = data.get("blocks") if isinstance(data.get("blocks"), list) else []
-
-    formatted_blocks: list[dict] = []
-    for raw in raw_blocks:
-        if not isinstance(raw, dict):
-            continue
-
-        box = raw.get("box")
-        if not isinstance(box, list) or len(box) != 4:
-            continue
-
-        block: dict[str, Any] = {
-            "type": str(raw.get("type") or "paragraph"),
-            "content": str(raw.get("content") or ""),
-            "page": _safe_int(raw.get("page", 1), 1),
-            "box": [float(c) for c in box],
-        }
-
-        # Keep only optional fields expected by downstream consumers of content.json files.
-        for optional_key in [
-            "filepath",
-            "number",
-            "caption",
-            "footnotes",
-            "block",
-            "cell_boxes",
-            "caption_box",
-            "caption_boxes",
-            "column_headers",
-            "row_indexes",
-        ]:
-            if optional_key in raw:
-                block[optional_key] = raw.get(optional_key)
-
-        formatted_blocks.append(block)
-
-    return {
-        "metadata": metadata,
-        "blocks": formatted_blocks,
-        "references": references,
-    }
-
-
-def _persist_extracted_assets(file_id: str, output_tmp: str) -> int:
-    output_root = Path(output_tmp)
-    cache_folder = ASSET_CACHE_ROOT / file_id
-    if cache_folder.exists():
-        shutil.rmtree(cache_folder)
-    cache_folder.mkdir(parents=True, exist_ok=True)
-
-    copied = 0
-    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
-
-    for src in output_root.rglob("*"):
-        if not src.is_file() or src.suffix.lower() not in image_suffixes:
-            continue
-
-        rel = src.relative_to(output_root)
-        dest = cache_folder / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        copied += 1
-
-    return copied
-
-
-def _list_cached_assets(doc_id: str) -> list[str]:
-    doc_folder = (ASSET_CACHE_ROOT / doc_id).resolve()
-    if not doc_folder.exists() or not doc_folder.is_dir():
-        return []
-
-    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
-    assets: list[str] = []
-    for item in doc_folder.rglob("*"):
-        if not item.is_file() or item.suffix.lower() not in image_suffixes:
-            continue
-        assets.append(item.relative_to(doc_folder).as_posix())
-
-    return sorted(assets)
 
 
 class SaveEditedPayload(BaseModel):
@@ -222,20 +150,6 @@ def _require_torchvision_runtime() -> None:
         ) from exc
 
 
-def _safe_int(value: Any, default: int = 1) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _safe_float(value: Any, default: float = 11.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
 def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
     normalized: list[dict] = []
     for idx, block in enumerate(raw_blocks):
@@ -255,49 +169,19 @@ def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
             {
                 **block,
                 "id": idx,
-                "page": _safe_int(block.get("page", 1), 1),
+                "page": safe_int(block.get("page", 1), 1),
                 "box": [float(c) for c in box],
                 "originalBox": [float(c) for c in box],
                 "content": str(content or ""),
-                "type": _normalize_layout_label(block_type),
-                "layout_type": str(block.get("layout_type") or block_type or _normalize_layout_label(block_type)),
-                "font_size": _safe_float(block.get("font_size", 11.0), 11.0),
+                "type": normalize_layout_label(block_type),
+                "layout_type": str(block.get("layout_type") or block_type or normalize_layout_label(block_type)),
+                "font_size": safe_float(block.get("font_size", 11.0), 11.0),
                 "color": block.get("color", (0, 0, 0)),
                 "source": source,
             }
         )
 
     return normalized
-
-
-def _find_first_content_json(output_tmp: str) -> Path:
-    content_files = sorted(Path(output_tmp).rglob("*_content.json"))
-    if not content_files:
-        raise RuntimeError("Pipeline finished without generating *_content.json output.")
-    return content_files[0]
-
-
-def _read_native_content_envelope(output_tmp: str) -> dict[str, Any]:
-    try:
-        content_path = _find_first_content_json(output_tmp)
-    except Exception:
-        return {"metadata": {}, "references": []}
-
-    try:
-        with open(content_path, "r", encoding="utf-8") as f:
-            parsed = json.load(f)
-    except Exception:
-        return {"metadata": {}, "references": []}
-
-    if not isinstance(parsed, dict):
-        return {"metadata": {}, "references": []}
-
-    metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
-    references = parsed.get("references") if isinstance(parsed.get("references"), list) else []
-    return {
-        "metadata": metadata,
-        "references": references,
-    }
 
 
 def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
@@ -445,7 +329,7 @@ def _extract_with_pdf2data_cli(
             if result.returncode != 0:
                 stderr_text = (result.stderr or "")
                 try:
-                    _find_first_content_json(output_tmp)
+                    find_first_content_json(output_tmp)
                     has_content = True
                 except Exception:
                     has_content = False
@@ -493,7 +377,7 @@ def _extract_with_pdf2data_cli(
             "PDF2Data execution failed in isolated subprocess. Check backend logs for native runtime errors."
         ) from last_error
 
-    content_path = _find_first_content_json(output_tmp)
+    content_path = find_first_content_json(output_tmp)
     with open(content_path, "r", encoding="utf-8") as f:
         parsed = json.load(f)
 
@@ -536,7 +420,7 @@ def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     if result.returncode != 0:
         stderr_text = (result.stderr or "")
         try:
-            _find_first_content_json(output_tmp)
+            find_first_content_json(output_tmp)
             has_content = True
         except Exception:
             has_content = False
@@ -551,7 +435,7 @@ def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
         else:
             raise RuntimeError("Docling execution failed in isolated subprocess.")
 
-    content_path = _find_first_content_json(output_tmp)
+    content_path = find_first_content_json(output_tmp)
     with open(content_path, "r", encoding="utf-8") as f:
         parsed = json.load(f)
 
@@ -693,9 +577,9 @@ async def upload_and_process(
                 pdf2data_table_model=pdf2data_table_model,
             )
 
-            native_content = _read_native_content_envelope(output_tmp)
+            native_content = read_native_content_envelope(output_tmp)
 
-            copied_assets = _persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
+            copied_assets = persist_extracted_assets(file_id=file_id, output_tmp=output_tmp)
 
             doc = fitz.open(str(file_path))
             page_sizes = []
@@ -756,7 +640,7 @@ async def save_edited_json(payload: SaveEditedPayload):
         output_root.mkdir(parents=True, exist_ok=True)
 
         data = dict(payload.data)
-        formatted = _format_as_content_json(data)
+        formatted = format_as_content_json(data)
         raw_name = str(payload.document_name or data.get("id") or uuid.uuid4()).strip()
         safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
         safe_name = safe_name or str(uuid.uuid4())
@@ -795,7 +679,7 @@ async def upgrade_json_action(payload: UpgradePayload):
         raise HTTPException(status_code=500, detail="Upgrade dependency is unavailable in this environment.") from exc
 
     try:
-        formatted = _format_as_content_json(dict(payload.data))
+        formatted = format_as_content_json(dict(payload.data))
         blocks = json.loads(json.dumps(formatted.get("blocks", [])))
 
         upgrader = Upgrader(

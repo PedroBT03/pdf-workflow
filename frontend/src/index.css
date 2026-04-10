@@ -1,7 +1,4 @@
 @import "tailwindcss";
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 
 body {
   margin: 0;
@@ -10,4 +7,29 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Themed scrollbar used in the workflow timeline panel. */
+.workflow-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 #18181b;
+}
+
+.workflow-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.workflow-scroll::-webkit-scrollbar-track {
+  background: #18181b;
+  border-radius: 9999px;
+}
+
+.workflow-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3f3f46 0%, #27272a 100%);
+  border-radius: 9999px;
+  border: 2px solid #18181b;
+}
+
+.workflow-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #52525b 0%, #3f3f46 100%);
 }
