@@ -58,7 +58,7 @@ const RIGHT_RAIL_WIDTH_PX = 380;
 type SelectedTarget =
   | { kind: 'block'; blockIndex: number }
   | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
-  | { kind: 'tableCaption'; blockIndex: number };
+  | { kind: 'tableCaption'; blockIndex: number; captionIndex: number };
 
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
@@ -491,77 +491,73 @@ const App = () => {
     }));
   };
 
-  const formatJson = () => {
-    try {
-      const parsed = JSON.parse(jsonDraft);
-      setJsonDraft(JSON.stringify(parsed, null, 2));
-      showEditorFeedback('success', 'JSON is valid and formatted.', 2200);
-    } catch {
-      showEditorFeedback('error', 'JSON is invalid. Fix it before exporting.', 3200);
-    }
-  };
-
   const updateSelectedContent = (value: string) => {
     if (!editSessionEnabled) {
       showEditorFeedback('info', 'Run the "Visualize / Edit JSON" action to enable editing.', 2600);
       return;
     }
-
     setSelectedContent(value);
-    if (!selectedTarget || !parsedData || !Array.isArray(parsedData.blocks)) return;
-
-    const next = JSON.parse(JSON.stringify(parsedData));
-    const targetBlock = next.blocks[selectedTarget.blockIndex];
-    if (!targetBlock) return;
-
-    if (selectedTarget.kind === 'tableCell') {
-      if (!Array.isArray(targetBlock.block)) {
-        targetBlock.block = [];
-      }
-      if (!Array.isArray(targetBlock.block[selectedTarget.row])) {
-        targetBlock.block[selectedTarget.row] = [];
-      }
-      targetBlock.block[selectedTarget.row][selectedTarget.col] = value;
-      setHasEditedJson(false);
-      setEditedJson(null);
-      setJsonDraft(JSON.stringify(next, null, 2));
-      return;
-    }
-
-    if (selectedTarget.kind === 'tableCaption') {
-      targetBlock.caption = value;
-      setHasEditedJson(false);
-      setEditedJson(null);
-      setJsonDraft(JSON.stringify(next, null, 2));
-      return;
-    }
-
-    targetBlock.content = value;
-    if (Array.isArray(next.Text) && selectedTarget.blockIndex < next.Text.length) {
-      next.Text[selectedTarget.blockIndex] = value;
-    }
-    setHasEditedJson(false);
-    setEditedJson(null);
-    setJsonDraft(JSON.stringify(next, null, 2));
   };
 
-  const finalizeEditedJson = () => {
+  const applyBlockChanges = async () => {
+    if (!editSessionEnabled || !selectedTarget || !parsedData) return;
+
+    setLoading(true);
+    try {
+      const target = {
+        kind: selectedTarget.kind,
+        block_index: selectedTarget.blockIndex,
+      };
+      if (selectedTarget.kind === 'tableCell') {
+        Object.assign(target, { row: selectedTarget.row, col: selectedTarget.col });
+      } else if (selectedTarget.kind === 'tableCaption') {
+        Object.assign(target, { caption_index: selectedTarget.captionIndex });
+      }
+
+      const response = await fetch(`${API_BASE}/api/actions/edit-json`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: parsedData,
+          target,
+          value: selectedContent,
+        }),
+      });
+
+      if (!response.ok) throw new Error('Edit failed');
+      const result = await response.json();
+      const nextJson = result?.canonical ?? result?.data;
+      setJsonDraft(JSON.stringify(nextJson, null, 2));
+      showEditorFeedback('success', 'Block saved.', 1500);
+    } catch (err: any) {
+      console.error(err);
+      showEditorFeedback('error', `Could not save: ${err.message}`, 2600);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const finalizeEditedJson = async () => {
     if (actionInProgress !== 'edit_json') return;
     if (!parsedData) {
       setWorkflowMessage({ type: 'error', message: 'Cannot finalize edits: JSON is invalid.' });
       return;
     }
 
-    const committed = JSON.parse(JSON.stringify(parsedData));
-    setEditedJson(committed);
-    setHasEditedJson(true);
-    setEditSessionEnabled(false);
-    setSelectedTarget(null);
-    setSelectedContent('');
-    setActionInProgress(null);
-    setWorkflowMessage({ type: 'success', message: 'Edits finalized. The edited JSON artifact is ready.' });
-    appendWorkflowPath('edit_json', 'done', 'Edits finalized');
-    setActiveSidebarTab('artifacts');
+    try {
+      const committed = JSON.parse(JSON.stringify(parsedData));
+      setEditedJson(committed);
+      setHasEditedJson(true);
+      setEditSessionEnabled(false);
+      setSelectedTarget(null);
+      setSelectedContent('');
+      setActionInProgress(null);
+      setWorkflowMessage({ type: 'success', message: 'Edits finalized. The edited JSON artifact is ready.' });
+      appendWorkflowPath('edit_json', 'done', 'Edits finalized');
+      setActiveSidebarTab('artifacts');
+    } catch (err: any) {
+      setWorkflowMessage({ type: 'error', message: 'Failed to finalize edits.' });
+    }
   };
 
   const exportJson = async () => {
@@ -578,8 +574,8 @@ const App = () => {
       .map((ch) => (/^[a-zA-Z0-9_-]$/.test(ch) ? ch : '_'))
       .join('');
 
-    const exportData = JSON.parse(JSON.stringify(parsedData));
-    const editedSnapshot = editedJson ? JSON.parse(JSON.stringify(editedJson)) : null;
+    const baseSnapshot = JSON.parse(JSON.stringify(docData ?? parsedData));
+    const editedSnapshot = hasEditedJson && editedJson ? JSON.parse(JSON.stringify(editedJson)) : null;
     const upgradedSnapshot = upgradedJson ? JSON.parse(JSON.stringify(upgradedJson)) : null;
 
     try {
@@ -640,8 +636,9 @@ const App = () => {
         }
       }
 
-      if (Array.isArray(exportData.blocks)) {
-        for (const block of exportData.blocks) {
+      const rewriteAssetPaths = (snapshot: any) => {
+        if (!Array.isArray(snapshot?.blocks)) return;
+        for (const block of snapshot.blocks) {
           if (typeof block?.filepath !== 'string') continue;
           const key = block.filepath.trim();
           if (!key) continue;
@@ -658,32 +655,38 @@ const App = () => {
             block.filepath = maybeBySuffix[1];
           }
         }
-      }
+      };
 
-      const filesToWrite: Array<{ name: string; data: any }> = [];
-      filesToWrite.push({ name: `${folderName}_content.json`, data: exportData });
+      rewriteAssetPaths(baseSnapshot);
+      if (editedSnapshot) rewriteAssetPaths(editedSnapshot);
+      if (upgradedSnapshot) rewriteAssetPaths(upgradedSnapshot);
+
+      const filesToWrite: Array<{ name: string; data: any; canonical: any }> = [];
+      const seenCanonical = new Set<string>();
+
+      const pushIfUnique = (name: string, data: any) => {
+        const canonical = toCanonicalContentJson(data);
+        const serialized = JSON.stringify(canonical);
+        if (seenCanonical.has(serialized)) return;
+        seenCanonical.add(serialized);
+        filesToWrite.push({ name, data, canonical });
+      };
+
+      // Baseline: exactly what came from PDF extraction (before edits/upgrades).
+      pushIfUnique(`${folderName}_content.json`, baseSnapshot);
 
       if (editedSnapshot) {
-        const editedSerialized = JSON.stringify(toCanonicalContentJson(editedSnapshot));
-        const currentSerialized = JSON.stringify(toCanonicalContentJson(exportData));
-        if (editedSerialized !== currentSerialized) {
-          filesToWrite.push({ name: `${folderName}_edited_content.json`, data: editedSnapshot });
-        }
+        pushIfUnique(`${folderName}_edited_content.json`, editedSnapshot);
       }
 
       if (upgradedSnapshot) {
-        const upgradedSerialized = JSON.stringify(toCanonicalContentJson(upgradedSnapshot));
-        const currentSerialized = JSON.stringify(toCanonicalContentJson(exportData));
-        if (upgradedSerialized !== currentSerialized) {
-          filesToWrite.push({ name: `${folderName}_upgraded_content.json`, data: upgradedSnapshot });
-        }
+        pushIfUnique(`${folderName}_upgraded_content.json`, upgradedSnapshot);
       }
 
       for (const item of filesToWrite) {
         const fileHandle = await docFolder.getFileHandle(item.name, { create: true });
         const writable = await fileHandle.createWritable();
-        const canonicalContentJson = toCanonicalContentJson(item.data);
-        await writable.write(new Blob([JSON.stringify(canonicalContentJson, null, 2)], { type: 'application/json' }));
+        await writable.write(new Blob([JSON.stringify(item.canonical, null, 2)], { type: 'application/json' }));
         await writable.close();
       }
 
@@ -942,7 +945,7 @@ const App = () => {
                   {selectedTarget.kind === 'tableCell'
                     ? `Selected table cell: #${selectedTarget.blockIndex + 1} R${selectedTarget.row + 1} C${selectedTarget.col + 1}`
                     : selectedTarget.kind === 'tableCaption'
-                    ? `Selected table caption: #${selectedTarget.blockIndex + 1}`
+                    ? `Selected table caption: #${selectedTarget.blockIndex + 1} (caption ${selectedTarget.captionIndex + 1})`
                     : `Selected box: #${selectedTarget.blockIndex + 1}`}
                 </div>
                 {selectedBlock && (
@@ -951,9 +954,10 @@ const App = () => {
                   </div>
                 )}
                 <textarea
-                  className="w-full h-52 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
+                  className="w-full h-40 p-4 bg-zinc-950 border border-zinc-700 rounded-2xl text-sm text-zinc-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-all shadow-inner"
                   value={selectedContent}
                   onChange={(e) => updateSelectedContent(e.target.value)}
+                  disabled={!editSessionEnabled}
                   readOnly={!editSessionEnabled}
                 />
               </div>
@@ -966,19 +970,20 @@ const App = () => {
             )}
 
             <button
-              onClick={formatJson}
-              className="mt-4 w-full bg-zinc-800 hover:bg-zinc-700 text-white py-3 rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"
+              onClick={applyBlockChanges}
+              disabled={loading || !editSessionEnabled}
+              className="mt-4 w-full bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-100 py-2 rounded-2xl font-semibold transition-all text-sm flex items-center justify-center gap-2"
             >
-              <CheckCircle2 className="w-4 h-4 text-zinc-400" />
-              Validate and Format Block
+              {loading ? 'Saving...' : 'Save block changes'}
+              <CheckCircle2 className="w-4 h-4" />
             </button>
 
             <button
-              onClick={finalizeEditedJson}
-              disabled={!editSessionEnabled || actionInProgress !== 'edit_json'}
+              onClick={() => finalizeEditedJson()}
+              disabled={!editSessionEnabled || actionInProgress !== 'edit_json' || loading}
               className="mt-3 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-2xl font-semibold transition-all"
             >
-              Mark edits as done
+              Finish editing
             </button>
 
             {editorFeedback && (
@@ -1129,7 +1134,7 @@ const App = () => {
                                   className={`absolute overflow-hidden pointer-events-auto transition-colors ${
                                     editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
                                   } ${
-                                    selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index
+                                    selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index && selectedTarget.captionIndex === captionIdx
                                       ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
                                       : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
                                   }`}
@@ -1145,7 +1150,7 @@ const App = () => {
                                       setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
                                       return;
                                     }
-                                    setSelectedTarget({ kind: 'tableCaption', blockIndex: index });
+                                    setSelectedTarget({ kind: 'tableCaption', blockIndex: index, captionIndex: captionIdx });
                                   }}
                                 />
                               );

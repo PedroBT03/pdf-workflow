@@ -1,82 +1,8 @@
-import json
-from pathlib import Path
-
 import main
 import pytest
 
 
 pytestmark = pytest.mark.integration
-
-
-def test_save_edited_json_creates_document_structure_with_canonical_schema(client, tmp_path):
-    # Verifies that /api/save-edited-json stores content.json in canonical shape: metadata, blocks, references.
-    payload = {
-        "output_folder": str(tmp_path),
-        "document_name": "paper-01",
-        "data": {
-            "metadata": {
-                "title": ["Example title"],
-                "doi": ["10.0000/example"],
-            },
-            "blocks": [
-                {
-                    "content": "First paragraph",
-                    "type": "paragraph",
-                    "box": [10, 20, 200, 60],
-                },
-                {
-                    "content": "Figure caption",
-                    "type": "Figure",
-                    "box": [30, 80, 300, 140],
-                    "filepath": "paper-01_images/Figure_1.png",
-                },
-                {
-                    "content": "Table",
-                    "type": "Table",
-                    "box": [40, 150, 340, 280],
-                    "block": [["H1", "H2"], ["A", "B"]],
-                    "cell_boxes": [
-                        [[40, 150, 190, 180], [190, 150, 340, 180]],
-                        [[40, 180, 190, 280], [190, 180, 340, 280]],
-                    ],
-                    "caption": "Table caption",
-                    "caption_box": [40, 282, 340, 298],
-                    "caption_boxes": [[40, 282, 340, 298]],
-                },
-            ],
-            "references": [{"citation-number": ["1"]}],
-        },
-    }
-
-    response = client.post("/api/save-edited-json", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-
-    saved_path = Path(body["saved_path"])
-    saved_folder = Path(body["saved_folder"])
-    images_folder = Path(body["images_folder"])
-
-    assert saved_path.exists()
-    assert saved_folder.exists()
-    assert images_folder.exists()
-    assert saved_path.name == "paper-01_content.json"
-
-    saved_json = json.loads(saved_path.read_text(encoding="utf-8"))
-    assert set(saved_json.keys()) == {"metadata", "blocks", "references"}
-    assert saved_json["metadata"]["title"] == ["Example title"]
-    assert saved_json["references"] == [{"citation-number": ["1"]}]
-    assert len(saved_json["blocks"]) == 3
-    assert saved_json["blocks"][0] == {
-        "type": "paragraph",
-        "content": "First paragraph",
-        "page": 1,
-        "box": [10.0, 20.0, 200.0, 60.0],
-    }
-    assert saved_json["blocks"][1]["filepath"] == "paper-01_images/Figure_1.png"
-    assert saved_json["blocks"][2]["cell_boxes"][0][0] == [40, 150, 190, 180]
-    assert saved_json["blocks"][2]["caption_box"] == [40, 282, 340, 298]
-    assert saved_json["blocks"][2]["caption_boxes"][0] == [40, 282, 340, 298]
 
 
 def test_assets_manifest_lists_only_image_files(client, tmp_path, monkeypatch):

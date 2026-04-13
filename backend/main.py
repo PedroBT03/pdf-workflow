@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import fitz
+from pdf2data.edit import JsonBoxEditor
 
 from core.content_json import (
     ASSET_CACHE_ROOT,
@@ -56,16 +57,24 @@ app.add_middleware(
 )
 
 
-class SaveEditedPayload(BaseModel):
-    output_folder: str
-    data: dict
-    document_name: str | None = None
-
-
 class UpgradePayload(BaseModel):
     data: dict
     mode: str = "both"
     distance_threshold: float = 50.0
+
+
+class EditTarget(BaseModel):
+    kind: str  # "block", "tableCell", "tableCaption"
+    block_index: int
+    row: int | None = None
+    col: int | None = None
+    caption_index: int | None = None
+
+
+class EditJsonPayload(BaseModel):
+    data: dict
+    target: EditTarget
+    value: str
 
 
 PROCESSOR_CATALOG: list[dict[str, Any]] = [
@@ -633,38 +642,35 @@ async def upload_and_process(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/save-edited-json")
-async def save_edited_json(payload: SaveEditedPayload):
+@app.post("/api/actions/edit-json")
+async def edit_json_action(payload: EditJsonPayload):
+    """Edit a specific target (block, tableCell, or tableCaption) in the JSON data using JsonBoxEditor."""
     try:
-        output_root = Path(payload.output_folder).expanduser()
-        output_root.mkdir(parents=True, exist_ok=True)
-
-        data = dict(payload.data)
-        formatted = format_as_content_json(data)
-        raw_name = str(payload.document_name or data.get("id") or uuid.uuid4()).strip()
-        safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
-        safe_name = safe_name or str(uuid.uuid4())
-
-        doc_folder = output_root / safe_name
-        images_folder = doc_folder / f"{safe_name}_images"
-        doc_folder.mkdir(parents=True, exist_ok=True)
-        images_folder.mkdir(parents=True, exist_ok=True)
-
-        filename = f"{safe_name}_content.json"
-        file_path = doc_folder / filename
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(formatted, f, indent=2, ensure_ascii=False)
-
-        return {
-            "saved_path": str(file_path),
-            "saved_folder": str(doc_folder),
-            "images_folder": str(images_folder),
-            "filename": filename,
+        editor = JsonBoxEditor(data=payload.data)
+        
+        # Convert EditTarget to the dict format expected by JsonBoxEditor
+        target_dict = {
+            "kind": payload.target.kind,
+            "block_index": payload.target.block_index,
         }
-    except Exception as e:
+        if payload.target.kind == "tableCell":
+            target_dict["row"] = payload.target.row
+            target_dict["col"] = payload.target.col
+        elif payload.target.kind == "tableCaption":
+            target_dict["caption_index"] = payload.target.caption_index
+        
+        editor.update_target(target_dict, payload.value)
+        
+        return {
+            "success": True,
+            "data": editor.data,
+            "canonical": editor.to_canonical_content_json(),
+        }
+    except (ValueError, IndexError) as exc:
+        raise HTTPException(status_code=400, detail=f"Edit failed: {str(exc)}") from exc
+    except Exception as exc:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to save edited JSON: {e}")
+        raise HTTPException(status_code=500, detail=f"Edit action failed: {str(exc)}") from exc
 
 
 @app.post("/api/actions/upgrade-json")
