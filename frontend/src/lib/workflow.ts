@@ -14,7 +14,7 @@ export type WorkflowPathItem = {
 
 export const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
   extract_json_from_pdf: 'Extract JSON from PDF',
-  edit_json: 'Visualize / Edit JSON',
+  edit_json: 'Edit JSON',
   upgrade_json: 'Upgrade JSON',
 };
 

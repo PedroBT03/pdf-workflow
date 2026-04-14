@@ -54,11 +54,20 @@ const PDF2DATA_TABLE_OPTIONS = [
 ];
 
 const RIGHT_RAIL_WIDTH_PX = 380;
+const WORKFLOW_EXECUTION_ORDER: WorkflowActionId[] = ['extract_json_from_pdf', 'edit_json', 'upgrade_json'];
 
 type SelectedTarget =
   | { kind: 'block'; blockIndex: number }
   | { kind: 'tableCell'; blockIndex: number; row: number; col: number }
   | { kind: 'tableCaption'; blockIndex: number; captionIndex: number };
+
+type WorkflowQueueItem = {
+  actionId: WorkflowActionId;
+  processor: string;
+  pdf2dataLayoutModel: string;
+  pdf2dataTableModel: string;
+  upgradeMode: UpgradeMode;
+};
 
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
@@ -68,6 +77,13 @@ const App = () => {
   const [selectedContent, setSelectedContent] = useState('');
   const [selectedAction, setSelectedAction] = useState<WorkflowActionId>('extract_json_from_pdf');
   const [actionInProgress, setActionInProgress] = useState<WorkflowActionId | null>(null);
+  const [plannedWorkflow, setPlannedWorkflow] = useState<WorkflowQueueItem[]>([]);
+  const [workflowQueue, setWorkflowQueue] = useState<WorkflowQueueItem[]>([]);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [batchStatus, setBatchStatus] = useState<'idle' | 'running' | 'paused' | 'completed' | 'failed'>('idle');
+  const [batchStatusDetail, setBatchStatusDetail] = useState('No batch run started yet.');
+  const [activeWorkflowView, setActiveWorkflowView] = useState<'executed' | 'queue'>('executed');
+  const [pendingBatchResumeQueue, setPendingBatchResumeQueue] = useState<WorkflowQueueItem[] | null>(null);
   const [upgradeMode, setUpgradeMode] = useState<UpgradeMode>('both');
   const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
   const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -114,6 +130,16 @@ const App = () => {
     };
   }, [workflowMessage]);
 
+  useEffect(() => {
+    if (!pendingBatchResumeQueue) return;
+    if (actionInProgress !== null) return;
+    if (editSessionEnabled) return;
+
+    const queueToResume = pendingBatchResumeQueue;
+    setPendingBatchResumeQueue(null);
+    void continueBatchWorkflow(queueToResume);
+  }, [pendingBatchResumeQueue, actionInProgress, editSessionEnabled]);
+
   const showEditorFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
     setEditorFeedback({ type, message });
     if (timeout > 0) {
@@ -135,9 +161,16 @@ const App = () => {
     setSelectedContent('');
     setSelectedAction('extract_json_from_pdf');
     setActionInProgress(null);
+    setPlannedWorkflow([]);
+    setWorkflowQueue([]);
+    setIsBatchRunning(false);
+    setBatchStatus('idle');
+    setBatchStatusDetail('No batch run started yet.');
+    setPendingBatchResumeQueue(null);
     setUpgradeMode('both');
     setWorkflowPath([]);
     setWorkflowMessage(null);
+    setActiveWorkflowView('executed');
     setActiveSidebarTab('workflow');
     setEditSessionEnabled(false);
     setHasEditedJson(false);
@@ -179,7 +212,7 @@ const App = () => {
   const hasJsonArtifact = Boolean(parsedData && Array.isArray(parsedData.blocks));
   const hasUpgradedArtifact = Boolean(upgradedJson);
   const isActionInProgress = actionInProgress !== null;
-  const showEditOverlays = editSessionEnabled && actionInProgress === 'edit_json';
+  const showJsonOverlays = hasJsonArtifact;
 
   const canRunAction = (action: WorkflowActionId) => {
     if (action === 'extract_json_from_pdf') return hasPdfArtifact;
@@ -290,6 +323,11 @@ const App = () => {
     setSelectedTarget(null);
     setSelectedContent('');
     setActionInProgress(null);
+    setPlannedWorkflow([]);
+    setWorkflowQueue([]);
+    setIsBatchRunning(false);
+    setBatchStatus('idle');
+    setBatchStatusDetail('No batch run started yet.');
     setEditorFeedback(null);
     setExportFeedback(null);
     setWorkflowMessage({ type: 'success', message: 'PDF imported. Choose an action from the workflow menu.' });
@@ -308,14 +346,14 @@ const App = () => {
   const runExtractJsonAction = async () => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
-      return;
+      return false;
     }
 
     if (!pdfFile) {
       const message = 'Import a PDF before running this action.';
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('extract_json_from_pdf', 'failed', message);
-      return;
+      return false;
     }
 
     setActionInProgress('extract_json_from_pdf');
@@ -350,33 +388,36 @@ const App = () => {
       setNumPages(Array.isArray(data?.page_sizes) ? data.page_sizes.length : 0);
       setCurrentPage(1);
       setPageSizes({});
+      setPageRefreshTick((tick) => tick + 1);
       setEditSessionEnabled(false);
       setHasEditedJson(false);
       setEditedJson(null);
       setUpgradedJson(null);
+      return true;
     } catch (err: any) {
       console.error(err);
       const message = `Action failed: ${err.message || 'unknown error'}`;
       showEditorFeedback('error', `Error processing PDF: ${err.message || 'unknown error'}`, 4000);
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('extract_json_from_pdf', 'failed', message);
+      return false;
     } finally {
       setLoading(false);
       setActionInProgress(null);
     }
   };
 
-  const runEditJsonAction = () => {
+  const runEditJsonAction = (skipJsonAvailabilityCheck = false) => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
-      return;
+      return false;
     }
 
-    if (!hasJsonArtifact) {
+    if (!skipJsonAvailabilityCheck && !hasJsonArtifact) {
       const message = 'Run Extract JSON first.';
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('edit_json', 'failed', message);
-      return;
+      return false;
     }
 
     setActionInProgress('edit_json');
@@ -390,20 +431,21 @@ const App = () => {
     });
     setPageRefreshTick((tick) => tick + 1);
     setActiveSidebarTab('editor');
-    setWorkflowMessage({ type: 'info', message: 'Edit action in progress. Select a box, edit it, then click "Mark edits as done".' });
+    setWorkflowMessage({ type: 'info', message: 'Edit action in progress. Select a box, save block changes, then click "Finish editing".' });
+    return true;
   };
 
   const runUpgradeJsonAction = async () => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
-      return;
+      return false;
     }
 
     if (!hasJsonArtifact) {
       const message = 'Run Extract JSON first.';
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('upgrade_json', 'failed', message);
-      return;
+      return false;
     }
 
     setActionInProgress('upgrade_json');
@@ -441,18 +483,148 @@ const App = () => {
         message: `Upgrade completed (${UPGRADE_MODE_LABELS[upgradeMode]}). Blocks: ${beforeCount} -> ${afterCount}.`,
       });
       appendWorkflowPath('upgrade_json', 'done', `${upgradeMode} | blocks ${beforeCount}->${afterCount}`);
+      return true;
     } catch (err: any) {
       console.error(err);
       const message = `Action failed: ${err.message || 'unknown error'}`;
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('upgrade_json', 'failed', message);
+      return false;
     } finally {
       setLoading(false);
       setActionInProgress(null);
     }
   };
 
+  const continueBatchWorkflow = async (queueOverride?: WorkflowQueueItem[]) => {
+    let queue = queueOverride ?? workflowQueue;
+    let extractedInThisBatchRun = false;
+
+    while (queue.length > 0) {
+      const [nextItem, ...rest] = queue;
+      const nextAction = nextItem.actionId;
+      
+      // Restore the options that were selected when this action was added
+      setProcessor(nextItem.processor);
+      setPdf2dataLayoutModel(nextItem.pdf2dataLayoutModel);
+      setPdf2dataTableModel(nextItem.pdf2dataTableModel);
+      setUpgradeMode(nextItem.upgradeMode);
+      setSelectedAction(nextAction);
+
+      if (nextAction === 'edit_json') {
+        const started = runEditJsonAction(extractedInThisBatchRun);
+        if (!started) {
+          setIsBatchRunning(false);
+          setWorkflowQueue([]);
+          setBatchStatus('failed');
+          setBatchStatusDetail('Batch workflow failed to start Edit JSON.');
+          return;
+        }
+
+        // Pause here until user finishes manual edit interaction.
+        setWorkflowQueue(rest);
+        setBatchStatus('paused');
+        if (rest.length > 0) {
+          setBatchStatusDetail(`Paused at Edit JSON. Next: ${WORKFLOW_ACTION_LABELS[rest[0].actionId]}.`);
+          setWorkflowMessage({
+            type: 'info',
+            message: `Workflow paused at Edit JSON. Finish editing to continue with ${WORKFLOW_ACTION_LABELS[rest[0].actionId]}.`,
+          });
+        } else {
+          setBatchStatusDetail('Paused at Edit JSON. Finish editing to complete batch workflow.');
+        }
+        return;
+      }
+
+      const ok = nextAction === 'extract_json_from_pdf' ? await runExtractJsonAction() : await runUpgradeJsonAction();
+      if (!ok) {
+        setIsBatchRunning(false);
+        setWorkflowQueue([]);
+        setBatchStatus('failed');
+        setBatchStatusDetail(`Batch workflow failed at ${WORKFLOW_ACTION_LABELS[nextAction]}.`);
+        return;
+      }
+
+      if (nextAction === 'extract_json_from_pdf') {
+        extractedInThisBatchRun = true;
+      }
+
+      queue = rest;
+      setWorkflowQueue(queue);
+      // Let React commit state updates from the finished action before starting the next one.
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), 0);
+      });
+    }
+
+    setIsBatchRunning(false);
+    setWorkflowQueue([]);
+    setBatchStatus('completed');
+    setBatchStatusDetail('Batch workflow completed successfully.');
+    setWorkflowMessage({ type: 'success', message: 'Selected workflow completed.' });
+  };
+
+  const runBatchWorkflow = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return;
+    }
+
+    if (isBatchRunning) return;
+
+    const selectedQueue = plannedWorkflow;
+    if (!selectedQueue.length) {
+      setWorkflowMessage({ type: 'info', message: 'Add at least one action to the workflow queue.' });
+      return;
+    }
+
+    setIsBatchRunning(true);
+    setWorkflowQueue(selectedQueue);
+    setBatchStatus('running');
+    setBatchStatusDetail(`Running ${selectedQueue.length} selected action(s).`);
+    setWorkflowMessage({ type: 'info', message: `Running ${selectedQueue.length} selected action(s)...` });
+    setActiveWorkflowView('executed');
+    await continueBatchWorkflow(selectedQueue);
+  };
+
+  const addSelectedActionToWorkflow = () => {
+    if (isActionInProgress || isBatchRunning) return;
+
+    setPlannedWorkflow((prev) => {
+      if (prev.some((item) => item.actionId === selectedAction)) {
+        setWorkflowMessage({ type: 'info', message: `${WORKFLOW_ACTION_LABELS[selectedAction]} is already in the workflow queue.` });
+        return prev;
+      }
+      const newItem: WorkflowQueueItem = {
+        actionId: selectedAction,
+        processor,
+        pdf2dataLayoutModel,
+        pdf2dataTableModel,
+        upgradeMode,
+      };
+      setActiveWorkflowView('queue');
+      setWorkflowMessage({ type: 'info', message: `${WORKFLOW_ACTION_LABELS[selectedAction]} added to workflow queue.` });
+      return [...prev, newItem];
+    });
+  };
+
+  const removeQueuedAction = (actionId: WorkflowActionId) => {
+    if (isBatchRunning) return;
+    setPlannedWorkflow((prev) => prev.filter((item) => item.actionId !== actionId));
+  };
+
+  const clearWorkflowQueue = () => {
+    if (isBatchRunning) return;
+    setPlannedWorkflow([]);
+    setWorkflowMessage({ type: 'info', message: 'Workflow queue cleared.' });
+  };
+
   const runSelectedAction = async () => {
+    if (isBatchRunning) {
+      setWorkflowMessage({ type: 'info', message: 'Batch workflow is running. Finish it before manual action execution.' });
+      return;
+    }
+
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
       return;
@@ -493,7 +665,7 @@ const App = () => {
 
   const updateSelectedContent = (value: string) => {
     if (!editSessionEnabled) {
-      showEditorFeedback('info', 'Run the "Visualize / Edit JSON" action to enable editing.', 2600);
+      showEditorFeedback('info', 'Run the "Edit JSON" action to enable editing.', 2600);
       return;
     }
     setSelectedContent(value);
@@ -555,6 +727,17 @@ const App = () => {
       setWorkflowMessage({ type: 'success', message: 'Edits finalized. The edited JSON artifact is ready.' });
       appendWorkflowPath('edit_json', 'done', 'Edits finalized');
       setActiveSidebarTab('artifacts');
+
+      if (isBatchRunning && workflowQueue.length > 0) {
+        const nextQueue = [...workflowQueue];
+        setBatchStatus('running');
+        setBatchStatusDetail(`Resuming batch workflow with ${WORKFLOW_ACTION_LABELS[nextQueue[0].actionId]}.`);
+        setPendingBatchResumeQueue(nextQueue);
+      } else if (isBatchRunning) {
+        setIsBatchRunning(false);
+        setBatchStatus('completed');
+        setBatchStatusDetail('Batch workflow completed successfully.');
+      }
     } catch (err: any) {
       setWorkflowMessage({ type: 'error', message: 'Failed to finalize edits.' });
     }
@@ -754,56 +937,160 @@ const App = () => {
   };
 
   const renderWorkflowRail = () => {
-    const workflowPreview = workflowPath.length
-      ? workflowPath
+    const batchStatusBadgeClass =
+      batchStatus === 'running'
+        ? 'text-sky-200 bg-sky-950/40 border-sky-900'
+        : batchStatus === 'paused'
+        ? 'text-amber-200 bg-amber-950/40 border-amber-900'
+        : batchStatus === 'completed'
+        ? 'text-emerald-200 bg-emerald-950/40 border-emerald-900'
+        : batchStatus === 'failed'
+        ? 'text-red-200 bg-red-950/40 border-red-900'
+        : 'text-zinc-300 bg-zinc-900/40 border-zinc-700';
+
+    const workflowPreview: Array<{
+      id: string;
+      action: WorkflowActionId;
+      label: string;
+      status: 'done' | 'failed' | 'running';
+      detail?: string;
+      timestamp: string;
+    }> = workflowPath.length
+      ? workflowPath.map((item) => ({ ...item, status: item.status }))
       : [
           {
             id: 'empty',
             action: selectedAction,
             label: 'No actions executed yet',
-            status: 'done' as const,
+            status: 'done',
             detail: 'Run an action from the left panel.',
             timestamp: '',
           },
         ];
 
+    if (actionInProgress) {
+      workflowPreview.push({
+        id: `running-${actionInProgress}`,
+        action: actionInProgress,
+        label: WORKFLOW_ACTION_LABELS[actionInProgress],
+        status: 'running',
+        detail: isBatchRunning ? 'Currently running inside batch workflow.' : 'Currently running.',
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    }
+
+    const queuePreview = plannedWorkflow.length
+      ? plannedWorkflow
+      : [];
+
     return (
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-5 h-170 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm uppercase tracking-[0.2em] text-zinc-500 font-semibold">Workflow</h2>
-          <div className="text-[11px] text-zinc-500">Executed steps</div>
+          <div className="text-[11px] text-zinc-500">{activeWorkflowView === 'executed' ? 'Executed steps' : 'Current queue'}</div>
         </div>
-        <div className="workflow-scroll flex-1 overflow-y-auto pr-1 space-y-3">
-          {workflowPreview.map((item, index) => (
-            <div key={item.id} className="flex flex-col items-stretch">
-              <div
-                className={`rounded-2xl border px-4 py-3 text-sm ${
-                  item.id === 'empty'
-                    ? 'border-zinc-700 bg-zinc-950/50 text-zinc-400'
-                    : item.status === 'done'
-                    ? 'border-emerald-900 bg-emerald-950/35 text-emerald-100'
-                    : 'border-red-900 bg-red-950/35 text-red-100'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-semibold">{item.label}</span>
-                  <span className="text-[11px] uppercase tracking-[0.18em] opacity-70">
-                    {item.id === 'empty' ? 'idle' : item.status}
-                  </span>
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setActiveWorkflowView('executed')}
+            className={`py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeWorkflowView === 'executed' ? 'bg-zinc-700 text-white' : 'bg-zinc-800 text-zinc-400'
+            }`}
+          >
+            Executed
+          </button>
+          <button
+            onClick={() => setActiveWorkflowView('queue')}
+            className={`py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeWorkflowView === 'queue' ? 'bg-zinc-700 text-white' : 'bg-zinc-800 text-zinc-400'
+            }`}
+          >
+            Current workflow
+          </button>
+        </div>
+        <div className={`mb-4 text-xs p-3 rounded-xl border ${batchStatusBadgeClass}`}>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-semibold">Batch status</span>
+            <span className="uppercase tracking-[0.16em] text-[10px] opacity-80">{batchStatus}</span>
+          </div>
+          <div className="mt-1 opacity-90">{batchStatusDetail}</div>
+        </div>
+        {activeWorkflowView === 'executed' ? (
+          <div className="workflow-scroll flex-1 overflow-y-auto pr-1 space-y-3">
+            {workflowPreview.map((item, index) => (
+              <div key={item.id} className="flex flex-col items-stretch">
+                <div
+                  className={`rounded-2xl border px-4 py-3 text-sm ${
+                    item.id === 'empty'
+                      ? 'border-zinc-700 bg-zinc-950/50 text-zinc-400'
+                      : item.status === 'running'
+                      ? 'border-sky-900 bg-sky-950/35 text-sky-100'
+                      : item.status === 'done'
+                      ? 'border-emerald-900 bg-emerald-950/35 text-emerald-100'
+                      : 'border-red-900 bg-red-950/35 text-red-100'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold">{item.label}</span>
+                    <span className="text-[11px] uppercase tracking-[0.18em] opacity-70">
+                      {item.id === 'empty' ? 'idle' : item.status}
+                    </span>
+                  </div>
+                  {item.detail && <div className="mt-2 text-xs text-inherit opacity-80">{item.detail}</div>}
+                  {item.timestamp && <div className="mt-2 text-[11px] opacity-60">{item.timestamp}</div>}
                 </div>
-                {item.detail && <div className="mt-2 text-xs text-inherit opacity-80">{item.detail}</div>}
-                {item.timestamp && <div className="mt-2 text-[11px] opacity-60">{item.timestamp}</div>}
+                {index < workflowPreview.length - 1 && (
+                  <div className="flex items-center justify-center py-2 text-zinc-500">
+                    <div className="h-4 w-px bg-zinc-700" />
+                    <span className="mx-2 text-xs">→</span>
+                    <div className="h-4 w-px bg-zinc-700" />
+                  </div>
+                )}
               </div>
-              {index < workflowPreview.length - 1 && (
-                <div className="flex items-center justify-center py-2 text-zinc-500">
-                  <div className="h-4 w-px bg-zinc-700" />
-                  <span className="mx-2 text-xs">→</span>
-                  <div className="h-4 w-px bg-zinc-700" />
+            ))}
+          </div>
+        ) : (
+          <div className="workflow-scroll flex-1 overflow-y-auto pr-1 space-y-3">
+            {queuePreview.length === 0 ? (
+              <div className="rounded-2xl border border-zinc-700 bg-zinc-950/50 text-zinc-400 px-4 py-6 text-sm text-center">
+                No actions queued. Add actions from the Actions panel.
+              </div>
+            ) : (
+              queuePreview.map((item, index) => (
+                <div key={`${item.actionId}-${index}`} className="rounded-2xl border border-zinc-700 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-200">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold">{index + 1}. {WORKFLOW_ACTION_LABELS[item.actionId]}</span>
+                    {!isBatchRunning ? (
+                      <button
+                        onClick={() => removeQueuedAction(item.actionId)}
+                        className="text-[11px] uppercase tracking-[0.16em] text-zinc-400 hover:text-zinc-200"
+                      >
+                        Remove
+                      </button>
+                    ) : (
+                      <span className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">locked</span>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
+              ))
+            )}
+
+            <button
+              onClick={runBatchWorkflow}
+              disabled={loading || isActionInProgress || isBatchRunning || queuePreview.length === 0}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
+            >
+              {isBatchRunning ? 'Workflow running...' : 'Start workflow execution'}
+            </button>
+
+            <button
+              onClick={clearWorkflowQueue}
+              disabled={isBatchRunning || queuePreview.length === 0}
+              className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-500 text-zinc-200 py-2 rounded-xl font-semibold transition-all text-sm"
+            >
+              Clear workflow
+            </button>
+          </div>
+        )}
       </div>
     );
   };
@@ -823,7 +1110,7 @@ const App = () => {
               className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
             >
               <option value="extract_json_from_pdf">Extract JSON from PDF</option>
-              <option value="edit_json">View / Edit JSON</option>
+              <option value="edit_json">Edit JSON</option>
               <option value="upgrade_json">Upgrade JSON</option>
             </select>
           </div>
@@ -896,10 +1183,18 @@ const App = () => {
 
           <button
             onClick={runSelectedAction}
-            disabled={loading || isActionInProgress || !canRunAction(selectedAction)}
+            disabled={loading || isActionInProgress || isBatchRunning || !canRunAction(selectedAction)}
             className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
           >
             {actionInProgress === 'edit_json' ? 'Edit action in progress' : loading ? 'Running action...' : 'Run action'}
+          </button>
+
+          <button
+            onClick={addSelectedActionToWorkflow}
+            disabled={isActionInProgress || isBatchRunning}
+            className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-500 text-zinc-200 py-2 rounded-xl font-semibold transition-all text-sm"
+          >
+            Add to workflow
           </button>
         </div>
 
@@ -919,12 +1214,12 @@ const App = () => {
       </div>
 
       <div className="mt-1">
-        {selectedAction === 'edit_json' && editSessionEnabled ? (
+        {editSessionEnabled ? (
           <div className="bg-zinc-950/45 border border-zinc-800 rounded-2xl p-4">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">JSON editor</div>
-                <div className="text-[11px] text-zinc-400 mt-1">Only active for View / Edit JSON</div>
+                <div className="text-[11px] text-zinc-400 mt-1">Only active for Edit JSON</div>
               </div>
               <div className="text-[11px] text-zinc-500">{editSessionEnabled ? 'editing' : 'preview'}</div>
             </div>
@@ -932,7 +1227,7 @@ const App = () => {
             <div className="text-xs text-zinc-400 mb-3 bg-zinc-800/50 p-3 rounded-xl">
               {editSessionEnabled
                 ? 'Click a box on the PDF to edit only that box metadata.'
-                : 'Run "View / Edit JSON" to enable box selection and editing.'}
+                : 'Run "Edit JSON" to enable box selection and editing.'}
             </div>
 
             {selectedTarget === null ? (
@@ -1023,7 +1318,9 @@ const App = () => {
         <div className="flex items-center justify-between mb-3 px-2">
           <div>
             <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">PDF preview</div>
-            <div className="text-xs text-zinc-400 mt-1">{editSessionEnabled ? 'Editing enabled' : 'Read/selection mode'}</div>
+            <div className="text-xs text-zinc-400 mt-1">
+              {hasJsonArtifact ? (editSessionEnabled ? 'Editing enabled' : 'Visualization active') : 'Waiting for extracted JSON'}
+            </div>
           </div>
           <div className="text-xs text-zinc-500">Page {currentPage} / {numPages || 1}</div>
         </div>
@@ -1042,9 +1339,9 @@ const App = () => {
                   renderAnnotationLayer={false}
                 />
 
-                {showEditOverlays && pageSizes[currentPage] && (
+                {showJsonOverlays && pageSizes[currentPage] && (
                   <div
-                    className="absolute top-0 left-0 pointer-events-none"
+                        className="absolute top-0 left-0 pointer-events-none"
                     style={{ width: pageSizes[currentPage].width, height: pageSizes[currentPage].height }}
                   >
                     {currentPageBlocks.map(({ block, index }: { block: any; index: number }) => {
@@ -1100,8 +1397,8 @@ const App = () => {
                                 return (
                                   <div
                                     key={`${index}-cell-${rowIdx}-${colIdx}`}
-                                    className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                                      editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                    className={`absolute overflow-hidden transition-colors ${
+                                      editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
                                     } ${
                                       cellSelected
                                         ? 'border-2 border-emerald-300 bg-emerald-300/20'
@@ -1116,7 +1413,7 @@ const App = () => {
                                     title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
                                     onClick={() => {
                                       if (!editSessionEnabled) {
-                                        setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                                        setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
                                         return;
                                       }
                                       setSelectedTarget({ kind: 'tableCell', blockIndex: index, row: rowIdx, col: colIdx });
@@ -1131,8 +1428,8 @@ const App = () => {
                               return (
                                 <div
                                   key={`${index}-caption-${captionIdx}`}
-                                  className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                                    editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                                  className={`absolute overflow-hidden transition-colors ${
+                                    editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
                                   } ${
                                     selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index && selectedTarget.captionIndex === captionIdx
                                       ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
@@ -1147,7 +1444,7 @@ const App = () => {
                                   title="Table caption"
                                   onClick={() => {
                                     if (!editSessionEnabled) {
-                                      setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                                      setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
                                       return;
                                     }
                                     setSelectedTarget({ kind: 'tableCaption', blockIndex: index, captionIndex: captionIdx });
@@ -1162,8 +1459,8 @@ const App = () => {
                       return (
                         <div
                           key={index}
-                          className={`absolute overflow-hidden pointer-events-auto transition-colors ${
-                            editSessionEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                          className={`absolute overflow-hidden transition-colors ${
+                            editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
                           } ${
                             isSelectedBlock
                               ? 'border-2 border-amber-300 bg-amber-300/20'
@@ -1173,7 +1470,7 @@ const App = () => {
                           title={block?.content || `Block ${index}`}
                           onClick={() => {
                             if (!editSessionEnabled) {
-                              setWorkflowMessage({ type: 'info', message: 'Run "View / Edit JSON" to enable editing.' });
+                              setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
                               return;
                             }
                             setSelectedTarget({ kind: 'block', blockIndex: index });
