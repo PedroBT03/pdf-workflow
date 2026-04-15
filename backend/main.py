@@ -225,6 +225,18 @@ def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     except subprocess.CalledProcessError as exc:
         raise RuntimeError("MinerU CLI execution failed. Check backend logs for details.") from exc
 
+    try:
+        content_path = find_first_content_json(output_tmp)
+        with open(content_path, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+
+        raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
+        if isinstance(raw_blocks, list) and raw_blocks:
+            return _normalize_raw_blocks(raw_blocks, source="mineru")
+    except Exception:
+        # Fallback to middle.json parsing for older MinerU outputs.
+        pass
+
     middle_files = sorted(Path(output_tmp).rglob("*_middle.json"))
     if not middle_files:
         raise RuntimeError("MinerU did not generate *_middle.json output.")
@@ -455,6 +467,64 @@ def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     return _normalize_raw_blocks(raw_blocks, source="docling")
 
 
+def _extract_with_mineru_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+    # Match the same execution path used by pdf2data-tools so table metadata
+    # (block/cell_boxes/caption_box) is preserved when MinerU is selected.
+    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
+    cmd = [
+        *base_cmd,
+        "--pipeline",
+        "MinerU",
+        "--extract_tables",
+        "true",
+        "--extract_figures",
+        "true",
+        "--device",
+        "cpu",
+    ]
+
+    child_env = os.environ.copy()
+    child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+    child_env.setdefault("OMP_NUM_THREADS", "1")
+    child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            timeout=900,
+            env=child_env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("MinerU timed out during conversion.") from exc
+
+    if result.returncode != 0:
+        stderr_text = (result.stderr or "")
+        try:
+            find_first_content_json(output_tmp)
+            has_content = True
+        except Exception:
+            has_content = False
+
+        if has_content and "anystyle" in stderr_text.lower():
+            pass
+        else:
+            raise RuntimeError("MinerU execution failed via pdf2data CLI.")
+
+    content_path = find_first_content_json(output_tmp)
+    with open(content_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+
+    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
+    if not isinstance(raw_blocks, list):
+        raw_blocks = []
+
+    return _normalize_raw_blocks(raw_blocks, source="mineru")
+
+
 def _extract_with_pipeline(input_tmp: str, output_tmp: str, processor_alias: str) -> list[dict]:
     return _extract_with_pipeline_options(
         input_tmp=input_tmp,
@@ -507,8 +577,12 @@ def _extract_with_pipeline_options(
         )
     elif pipeline_name == "MinerU":
         _require_modules(["pdf2data", "mineru", "ultralytics", "accelerate", "ftfy", "dill", "omegaconf"], "MinerU")
-        # Use MinerU CLI path directly; more stable across MinerU output layout changes.
-        return _extract_with_mineru_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+        # Prefer the same path used by pdf2data-tools so table metadata is kept.
+        try:
+            return _extract_with_mineru_pdf2data_cli(input_tmp=input_tmp, output_tmp=output_tmp)
+        except Exception:
+            # Fallback to direct MinerU CLI for environments where the wrapper path fails.
+            return _extract_with_mineru_cli(input_tmp=input_tmp, output_tmp=output_tmp)
     elif pipeline_name == "Docling":
         _require_modules(["pdf2data", "docling"], "Docling")
         return _extract_with_docling_cli(input_tmp=input_tmp, output_tmp=output_tmp)
@@ -522,6 +596,36 @@ def _extract_with_pipeline_options(
         )
     else:
         raise RuntimeError(f"Unsupported pipeline: {pipeline_name}")
+
+
+def _prepare_blocks_for_upgrade(blocks: list[Any]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for raw in blocks:
+        if not isinstance(raw, dict):
+            continue
+
+        box = raw.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            continue
+
+        try:
+            normalized_box = [float(c) for c in box]
+        except Exception:
+            continue
+
+        block = dict(raw)
+        block["type"] = str(raw.get("type") or "paragraph")
+        block["content"] = str(raw.get("content") or "")
+        block["page"] = safe_int(raw.get("page", 1), 1)
+        block["box"] = normalized_box
+
+        # Keep caption optional while normalizing type when it exists.
+        if "caption" in block:
+            block["caption"] = str(block.get("caption") or "")
+
+        prepared.append(block)
+
+    return prepared
 
 
 @app.get("/api/processors")
@@ -686,7 +790,7 @@ async def upgrade_json_action(payload: UpgradePayload):
 
     try:
         formatted = format_as_content_json(dict(payload.data))
-        blocks = json.loads(json.dumps(formatted.get("blocks", [])))
+        blocks = _prepare_blocks_for_upgrade(json.loads(json.dumps(formatted.get("blocks", []))))
 
         upgrader = Upgrader(
             correct_unicodes=mode in {"text", "both"},

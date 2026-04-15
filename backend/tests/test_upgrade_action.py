@@ -27,6 +27,7 @@ def test_upgrade_json_text_mode_corrects_unicode(client):
     body = response.json()
     assert body["mode"] == "text"
     assert body["data"]["blocks"][0]["content"] == "office"
+    assert "caption" not in body["data"]["blocks"][0]
 
 
 def test_upgrade_json_figures_mode_merges_adjacent_figures(client):

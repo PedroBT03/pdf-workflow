@@ -7,7 +7,7 @@ export type WorkflowPathItem = {
   id: string;
   action: WorkflowActionId;
   label: string;
-  status: 'done' | 'failed';
+  status: 'done' | 'failed' | 'skipped';
   detail?: string;
   timestamp: string;
 };

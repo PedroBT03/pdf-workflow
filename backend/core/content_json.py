@@ -62,10 +62,12 @@ def format_as_content_json(data: dict) -> dict:
             "box": [float(c) for c in box],
         }
 
+        if "caption" in raw:
+            block["caption"] = str(raw.get("caption") or "")
+
         for optional_key in [
             "filepath",
             "number",
-            "caption",
             "footnotes",
             "block",
             "cell_boxes",

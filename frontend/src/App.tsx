@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Upload, FileText, Loader2, Braces, CheckCircle2, Download, FolderOpen } from 'lucide-react';
 import {
@@ -67,6 +67,7 @@ type WorkflowQueueItem = {
   pdf2dataLayoutModel: string;
   pdf2dataTableModel: string;
   upgradeMode: UpgradeMode;
+  selected: boolean;
 };
 
 const App = () => {
@@ -102,11 +103,18 @@ const App = () => {
   const [processorOptions, setProcessorOptions] = useState<ProcessorOption[]>(DEFAULT_PROCESSORS);
   const [processorLoadWarning, setProcessorLoadWarning] = useState<string | null>(null);
   const [pageSizes, setPageSizes] = useState<Record<number, { width: number; height: number; scale: number }>>({});
+  const [lastRenderedPageHeight, setLastRenderedPageHeight] = useState<number>(0);
   const [pageRefreshTick, setPageRefreshTick] = useState(0);
   const [pdfFile, setPdfFile] = useState<Blob | null>(null);
   const [sourceFilename, setSourceFilename] = useState('metadata');
   const [outputFolderHandle, setOutputFolderHandle] = useState<any | null>(null);
   const [outputFolderName, setOutputFolderName] = useState<string>('No folder selected');
+  const workflowJsonRef = useRef<any | null>(null);
+  const pdfViewerScrollRef = useRef<HTMLDivElement | null>(null);
+  const savedViewerScrollTopRef = useRef(0);
+  const savedWindowScrollTopRef = useRef(0);
+  const exportFeedbackTimeoutRef = useRef<number | null>(null);
+  const [pageJumpValue, setPageJumpValue] = useState('1');
 
   useEffect(() => {
     if (selectedAction !== 'edit_json') {
@@ -149,13 +157,29 @@ const App = () => {
 
   const showExportFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
     setExportFeedback({ type, message });
+    if (exportFeedbackTimeoutRef.current !== null) {
+      window.clearTimeout(exportFeedbackTimeoutRef.current);
+      exportFeedbackTimeoutRef.current = null;
+    }
     if (timeout > 0) {
-      window.setTimeout(() => setExportFeedback(null), timeout);
+      exportFeedbackTimeoutRef.current = window.setTimeout(() => {
+        setExportFeedback(null);
+        exportFeedbackTimeoutRef.current = null;
+      }, timeout);
     }
   };
 
+  useEffect(() => {
+    return () => {
+      if (exportFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(exportFeedbackTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const resetWorkflow = () => {
     setDocData(null);
+    workflowJsonRef.current = null;
     setJsonDraft('');
     setSelectedTarget(null);
     setSelectedContent('');
@@ -180,6 +204,7 @@ const App = () => {
     setExportFeedback(null);
     setNumPages(0);
     setCurrentPage(1);
+    setPageJumpValue('1');
     setPdf2dataLayoutModel('auto');
     setPdf2dataTableModel('none');
     setPageSizes({});
@@ -207,12 +232,29 @@ const App = () => {
 
   const parsedData = parsedState?.data ?? null;
   const jsonError = parsedState?.error ?? null;
+  useEffect(() => {
+    if (parsedData && Array.isArray(parsedData.blocks)) {
+      workflowJsonRef.current = parsedData;
+    }
+  }, [parsedData]);
   const disabledProcessors = useMemo(() => processorOptions.filter((item) => !item.enabled), [processorOptions]);
   const hasPdfArtifact = Boolean(pdfFile);
-  const hasJsonArtifact = Boolean(parsedData && Array.isArray(parsedData.blocks));
+  const hasJsonArtifact = Boolean(
+    (workflowJsonRef.current && Array.isArray(workflowJsonRef.current.blocks)) ||
+      (parsedData && Array.isArray(parsedData.blocks)),
+  );
   const hasUpgradedArtifact = Boolean(upgradedJson);
   const isActionInProgress = actionInProgress !== null;
   const showJsonOverlays = hasJsonArtifact;
+
+  const getWorkflowJsonArtifact = () => {
+    const refArtifact = workflowJsonRef.current;
+    if (refArtifact && Array.isArray(refArtifact.blocks)) return refArtifact;
+    if (parsedData && Array.isArray(parsedData.blocks)) return parsedData;
+    if (editedJson && Array.isArray(editedJson.blocks)) return editedJson;
+    if (docData && Array.isArray(docData.blocks)) return docData;
+    return null;
+  };
 
   const canRunAction = (action: WorkflowActionId) => {
     if (action === 'extract_json_from_pdf') return hasPdfArtifact;
@@ -221,7 +263,7 @@ const App = () => {
     return false;
   };
 
-  const appendWorkflowPath = (action: WorkflowActionId, status: 'done' | 'failed', detail?: string) => {
+  const appendWorkflowPath = (action: WorkflowActionId, status: 'done' | 'failed' | 'skipped', detail?: string) => {
     const item: WorkflowPathItem = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       action,
@@ -319,6 +361,7 @@ const App = () => {
     setPdfFile(file);
     setSourceFilename(file.name);
     setDocData(null);
+    workflowJsonRef.current = null;
     setJsonDraft('');
     setSelectedTarget(null);
     setSelectedContent('');
@@ -333,6 +376,7 @@ const App = () => {
     setWorkflowMessage({ type: 'success', message: 'PDF imported. Choose an action from the workflow menu.' });
     setNumPages(0);
     setCurrentPage(1);
+    setPageJumpValue('1');
     setPageSizes({});
     setEditSessionEnabled(false);
     setHasEditedJson(false);
@@ -377,6 +421,7 @@ const App = () => {
       const data = await response.json();
 
       setDocData(data);
+      workflowJsonRef.current = data;
       setJsonDraft(JSON.stringify(data, null, 2));
       setSelectedTarget(null);
       setSelectedContent('');
@@ -441,7 +486,8 @@ const App = () => {
       return false;
     }
 
-    if (!hasJsonArtifact) {
+    const workflowArtifact = getWorkflowJsonArtifact();
+    if (!workflowArtifact) {
       const message = 'Run Extract JSON first.';
       setWorkflowMessage({ type: 'error', message });
       appendWorkflowPath('upgrade_json', 'failed', message);
@@ -456,7 +502,7 @@ const App = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode: upgradeMode,
-          data: parsedData,
+          data: workflowArtifact,
         }),
       });
 
@@ -471,6 +517,7 @@ const App = () => {
       }
 
       setUpgradedJson(upgraded);
+      workflowJsonRef.current = upgraded;
       setJsonDraft(JSON.stringify(upgraded, null, 2));
       setSelectedTarget(null);
       setSelectedContent('');
@@ -503,6 +550,16 @@ const App = () => {
     while (queue.length > 0) {
       const [nextItem, ...rest] = queue;
       const nextAction = nextItem.actionId;
+
+      if (!nextItem.selected) {
+        appendWorkflowPath(nextAction, 'skipped', 'Deselected in workflow queue.');
+        queue = rest;
+        setWorkflowQueue(queue);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), 0);
+        });
+        continue;
+      }
       
       // Restore the options that were selected when this action was added
       setProcessor(nextItem.processor);
@@ -578,13 +635,19 @@ const App = () => {
       return;
     }
 
+    const runnableQueue = selectedQueue.filter((item) => item.selected);
+    if (!runnableQueue.length) {
+      setWorkflowMessage({ type: 'info', message: 'Select at least one action to run.' });
+      return;
+    }
+
     setIsBatchRunning(true);
-    setWorkflowQueue(selectedQueue);
+    setWorkflowQueue(runnableQueue);
     setBatchStatus('running');
-    setBatchStatusDetail(`Running ${selectedQueue.length} selected action(s).`);
-    setWorkflowMessage({ type: 'info', message: `Running ${selectedQueue.length} selected action(s)...` });
+    setBatchStatusDetail(`Running ${runnableQueue.length} selected action(s) from ${selectedQueue.length} queued.`);
+    setWorkflowMessage({ type: 'info', message: `Running ${runnableQueue.length} selected action(s)...` });
     setActiveWorkflowView('executed');
-    await continueBatchWorkflow(selectedQueue);
+    await continueBatchWorkflow(runnableQueue);
   };
 
   const addSelectedActionToWorkflow = () => {
@@ -601,11 +664,21 @@ const App = () => {
         pdf2dataLayoutModel,
         pdf2dataTableModel,
         upgradeMode,
+        selected: true,
       };
       setActiveWorkflowView('queue');
       setWorkflowMessage({ type: 'info', message: `${WORKFLOW_ACTION_LABELS[selectedAction]} added to workflow queue.` });
       return [...prev, newItem];
     });
+  };
+
+  const toggleQueuedActionSelected = (actionId: WorkflowActionId) => {
+    if (isBatchRunning) return;
+    setPlannedWorkflow((prev) =>
+      prev.map((item) =>
+        item.actionId === actionId ? { ...item, selected: !item.selected } : item,
+      ),
+    );
   };
 
   const removeQueuedAction = (actionId: WorkflowActionId) => {
@@ -648,11 +721,17 @@ const App = () => {
       if (prev > totalPages) return totalPages;
       return prev;
     });
+    setPageJumpValue((prev) => {
+      const parsed = Number(prev);
+      const next = Number.isFinite(parsed) && parsed >= 1 ? Math.min(totalPages, Math.floor(parsed)) : 1;
+      return String(next);
+    });
   };
 
   const onPageLoadSuccess = (pageNumber: number, page: any) => {
     const viewport = page.getViewport({ scale: 1.5 });
     const nextScale = viewport.width / page.originalWidth;
+    setLastRenderedPageHeight(viewport.height);
     setPageSizes((prev) => ({
       ...prev,
       [pageNumber]: {
@@ -700,6 +779,7 @@ const App = () => {
       const result = await response.json();
       const nextJson = result?.canonical ?? result?.data;
       setJsonDraft(JSON.stringify(nextJson, null, 2));
+      workflowJsonRef.current = nextJson;
       showEditorFeedback('success', 'Block saved.', 1500);
     } catch (err: any) {
       console.error(err);
@@ -719,6 +799,7 @@ const App = () => {
     try {
       const committed = JSON.parse(JSON.stringify(parsedData));
       setEditedJson(committed);
+      workflowJsonRef.current = committed;
       setHasEditedJson(true);
       setEditSessionEnabled(false);
       setSelectedTarget(null);
@@ -881,7 +962,7 @@ const App = () => {
         showExportFeedback('info', `Saved ${filesToWrite.length} JSON file(s), copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
       }
     } catch (err: any) {
-      showExportFeedback('error', `Export failed: ${err.message || 'unknown error'}`, 4000);
+      showExportFeedback('error', `Artifacts export failed: ${err.message || 'unknown error'}`, 4000);
     }
   };
 
@@ -926,14 +1007,42 @@ const App = () => {
     .filter(({ block }: { block: any }) => Number(block?.page ?? 1) === currentPage);
   const selectedBlock = selectedTarget ? previewBlocks[selectedTarget.blockIndex] : null;
 
-  const goToPreviousPage = () => {
+  useEffect(() => {
+    setPageJumpValue(String(currentPage));
+  }, [currentPage]);
+
+  useLayoutEffect(() => {
+    const container = pdfViewerScrollRef.current;
+    if (!container) return;
+    container.scrollTop = savedViewerScrollTopRef.current;
+    window.scrollTo({ top: savedWindowScrollTopRef.current, behavior: 'auto' });
+  }, [currentPage, pageRefreshTick]);
+
+  const navigateToPage = (nextPage: number) => {
+    const container = pdfViewerScrollRef.current;
+    if (container) {
+      savedViewerScrollTopRef.current = container.scrollTop;
+    }
+    savedWindowScrollTopRef.current = window.scrollY;
     setSelectedTarget(null);
-    setCurrentPage((p) => Math.max(1, p - 1));
+    setCurrentPage(Math.min(Math.max(1, nextPage), numPages || 1));
+  };
+
+  const goToPreviousPage = () => {
+    navigateToPage(currentPage - 1);
   };
 
   const goToNextPage = () => {
-    setSelectedTarget(null);
-    setCurrentPage((p) => Math.min(numPages || 1, p + 1));
+    navigateToPage(currentPage + 1);
+  };
+
+  const submitPageJump = () => {
+    const parsed = Number(pageJumpValue);
+    if (!Number.isFinite(parsed)) {
+      setPageJumpValue(String(currentPage));
+      return;
+    }
+    navigateToPage(Math.floor(parsed));
   };
 
   const renderWorkflowRail = () => {
@@ -952,7 +1061,7 @@ const App = () => {
       id: string;
       action: WorkflowActionId;
       label: string;
-      status: 'done' | 'failed' | 'running';
+      status: 'done' | 'failed' | 'running' | 'skipped';
       detail?: string;
       timestamp: string;
     }> = workflowPath.length
@@ -1024,6 +1133,8 @@ const App = () => {
                       ? 'border-zinc-700 bg-zinc-950/50 text-zinc-400'
                       : item.status === 'running'
                       ? 'border-sky-900 bg-sky-950/35 text-sky-100'
+                      : item.status === 'skipped'
+                      ? 'border-zinc-700 bg-zinc-950/35 text-zinc-400'
                       : item.status === 'done'
                       ? 'border-emerald-900 bg-emerald-950/35 text-emerald-100'
                       : 'border-red-900 bg-red-950/35 text-red-100'
@@ -1056,9 +1167,27 @@ const App = () => {
               </div>
             ) : (
               queuePreview.map((item, index) => (
-                <div key={`${item.actionId}-${index}`} className="rounded-2xl border border-zinc-700 bg-zinc-950/40 px-4 py-3 text-sm text-zinc-200">
+                <div
+                  key={`${item.actionId}-${index}`}
+                  className={`rounded-2xl border px-4 py-3 text-sm ${
+                    item.selected
+                      ? 'border-zinc-700 bg-zinc-950/40 text-zinc-200'
+                      : 'border-zinc-800 bg-zinc-950/20 text-zinc-500'
+                  }`}
+                >
                   <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold">{index + 1}. {WORKFLOW_ACTION_LABELS[item.actionId]}</span>
+                    <label className="flex items-center gap-3 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={item.selected}
+                        onChange={() => toggleQueuedActionSelected(item.actionId)}
+                        disabled={isBatchRunning}
+                        className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-blue-600 focus:ring-blue-600"
+                      />
+                      <span className={`font-semibold ${item.selected ? '' : 'line-through opacity-70'}`}>
+                        {index + 1}. {WORKFLOW_ACTION_LABELS[item.actionId]}
+                      </span>
+                    </label>
                     {!isBatchRunning ? (
                       <button
                         onClick={() => removeQueuedAction(item.actionId)}
@@ -1070,13 +1199,20 @@ const App = () => {
                       <span className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">locked</span>
                     )}
                   </div>
+                  <div className="mt-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500">
+                    {item.selected ? 'Will run' : 'Saved for later'}
+                  </div>
                 </div>
               ))
             )}
 
+            <div className="text-[11px] text-zinc-500 px-1 -mt-1">
+              Unchecked actions stay in the workflow and can be run later.
+            </div>
+
             <button
               onClick={runBatchWorkflow}
-              disabled={loading || isActionInProgress || isBatchRunning || queuePreview.length === 0}
+              disabled={loading || isActionInProgress || isBatchRunning || queuePreview.every((item) => !item.selected)}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
             >
               {isBatchRunning ? 'Workflow running...' : 'Start workflow execution'}
@@ -1326,11 +1462,11 @@ const App = () => {
         </div>
 
         <div className="flex-1 flex flex-col gap-4 min-h-0">
-          <div className="flex-1 min-h-120 overflow-auto rounded-2xl border border-zinc-800 bg-zinc-950/50">
+          <div ref={pdfViewerScrollRef} className="flex-1 min-h-120 overflow-auto rounded-2xl border border-zinc-800 bg-zinc-950/50">
             <Document file={pdfFile} onLoadSuccess={onDocumentLoadSuccess}>
-              <div className="relative">
+              <div className="relative" style={{ minHeight: lastRenderedPageHeight || undefined }}>
                 <Page
-                  key={`pdf-page-${currentPage}-${pageRefreshTick}`}
+                  key={`pdf-page-${pageRefreshTick}`}
                   pageNumber={currentPage}
                   scale={1.5}
                   onLoadSuccess={(page) => onPageLoadSuccess(page.pageNumber, page)}
@@ -1492,8 +1628,24 @@ const App = () => {
             >
               Previous
             </button>
-            <div className="text-sm text-zinc-400">
-              Page {currentPage} / {numPages || 1}
+            <div className="flex items-center gap-2 text-sm text-zinc-400">
+              <span>Page</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={pageJumpValue}
+                onChange={(e) => setPageJumpValue(e.target.value.replace(/\D/g, ''))}
+                onBlur={submitPageJump}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submitPageJump();
+                  }
+                }}
+                className="w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-blue-600"
+              />
+              <span>/ {numPages || 1}</span>
             </div>
             <button
               onClick={goToNextPage}
@@ -1543,7 +1695,7 @@ const App = () => {
         <FolderOpen className="w-4 h-4" /> Choose Output Folder
       </button>
       <div
-        className={`mt-3 text-xs rounded-xl px-3 py-2 border ${
+        className={`mt-3 text-xs rounded-xl px-3 py-2 border whitespace-normal break-all leading-relaxed ${
           outputFolderHandle
             ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900'
             : 'text-zinc-400 bg-zinc-950/40 border-zinc-700'
@@ -1557,11 +1709,11 @@ const App = () => {
         className="mt-3 w-full py-3 bg-white text-black rounded-2xl font-black text-base hover:bg-zinc-200 transition-all disabled:bg-zinc-800 disabled:text-zinc-500 flex items-center justify-center gap-3"
       >
         <Download className="w-5 h-5" />
-        Export JSON
+        Export artifacts
       </button>
       {exportFeedback && (
         <div
-          className={`mt-3 text-xs p-3 rounded-xl border ${
+          className={`mt-3 text-xs p-3 rounded-xl border whitespace-normal break-all leading-relaxed ${
             exportFeedback.type === 'error'
               ? 'text-red-200 bg-red-950/40 border-red-900'
               : exportFeedback.type === 'success'
