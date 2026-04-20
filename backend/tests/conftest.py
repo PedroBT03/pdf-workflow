@@ -10,12 +10,14 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    # Register custom pytest markers used by this test suite.
     config.addinivalue_line("markers", "unit: fast unit tests with no external runtime dependencies")
     config.addinivalue_line("markers", "integration: API/integration tests covering endpoint behavior")
     config.addinivalue_line("markers", "ml: marks tests that require ML runtime dependencies")
 
 
 def pytest_collection_modifyitems(config, items):
+    # Skip ML-marked tests unless the --run-ml flag is explicitly enabled.
     if config.getoption("--run-ml"):
         return
 
@@ -27,4 +29,5 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture()
 def client() -> TestClient:
+    # Provide a shared FastAPI test client fixture for endpoint tests.
     return TestClient(app)

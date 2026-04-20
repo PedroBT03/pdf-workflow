@@ -13,11 +13,13 @@ interface BoundingBox {
   legend?: string;
 }
 
+// Render a PDF page with Konva overlays aligned to metadata bounding boxes.
 const PDFAnnotator = ({ pdfUrl, metadata }: { pdfUrl: string, metadata: any }) => {
   const [scale, setScale] = useState(1);
   const [pageDimensions, setPageDimensions] = useState({ width: 0, height: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Update rendered page dimensions and coordinate scale after page load.
   const handlePageLoadSuccess = (page: any) => {
     const { width, height, originalWidth } = page;
     

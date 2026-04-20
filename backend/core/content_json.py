@@ -13,6 +13,7 @@ ASSET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def safe_int(value: Any, default: int = 1) -> int:
+    # Convert a value to int, returning a fallback on conversion errors.
     try:
         return int(value)
     except Exception:
@@ -20,6 +21,7 @@ def safe_int(value: Any, default: int = 1) -> int:
 
 
 def safe_float(value: Any, default: float = 11.0) -> float:
+    # Convert a value to float, returning a fallback on conversion errors.
     try:
         return float(value)
     except Exception:
@@ -27,6 +29,7 @@ def safe_float(value: Any, default: float = 11.0) -> float:
 
 
 def normalize_layout_label(raw_label: str) -> str:
+    # Map pipeline-specific layout labels to canonical schema labels.
     label = raw_label.strip().lower()
     if label in {"text", "paragraph"}:
         return "paragraph"
@@ -42,6 +45,7 @@ def normalize_layout_label(raw_label: str) -> str:
 
 
 def format_as_content_json(data: dict) -> dict:
+    # Normalize arbitrary extraction payloads into the canonical content JSON shape.
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     references = data.get("references") if isinstance(data.get("references"), list) else []
     raw_blocks = data.get("blocks") if isinstance(data.get("blocks"), list) else []
@@ -89,6 +93,7 @@ def format_as_content_json(data: dict) -> dict:
 
 
 def persist_extracted_assets(file_id: str, output_tmp: str, asset_root: Path | None = None) -> int:
+    # Copy extracted image assets into a document-scoped cache folder.
     output_root = Path(output_tmp)
     root = asset_root or ASSET_CACHE_ROOT
     cache_folder = root / file_id
@@ -113,6 +118,7 @@ def persist_extracted_assets(file_id: str, output_tmp: str, asset_root: Path | N
 
 
 def list_cached_assets(doc_id: str, asset_root: Path | None = None) -> list[str]:
+    # Return sorted relative paths of cached image assets for a document.
     root = asset_root or ASSET_CACHE_ROOT
     doc_folder = (root / doc_id).resolve()
     if not doc_folder.exists() or not doc_folder.is_dir():
@@ -129,6 +135,7 @@ def list_cached_assets(doc_id: str, asset_root: Path | None = None) -> list[str]
 
 
 def find_first_content_json(output_tmp: str) -> Path:
+    # Find the first generated *_content.json file in a pipeline output folder.
     content_files = sorted(Path(output_tmp).rglob("*_content.json"))
     if not content_files:
         raise RuntimeError("Pipeline finished without generating *_content.json output.")
@@ -136,6 +143,7 @@ def find_first_content_json(output_tmp: str) -> Path:
 
 
 def read_native_content_envelope(output_tmp: str) -> dict[str, Any]:
+    # Read metadata and references from native content JSON, with safe fallbacks.
     try:
         content_path = find_first_content_json(output_tmp)
     except Exception:

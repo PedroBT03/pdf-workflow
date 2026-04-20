@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Upload, FileText, Loader2, Braces, CheckCircle2, Download, FolderOpen } from 'lucide-react';
+import { Upload, FileText, Loader2, Braces, CheckCircle2, Download, FolderOpen, Info } from 'lucide-react';
 import {
   API_BASE,
   buildAssetUrl,
@@ -54,7 +54,9 @@ const PDF2DATA_TABLE_OPTIONS = [
 ];
 
 const RIGHT_RAIL_WIDTH_PX = 380;
-const WORKFLOW_EXECUTION_ORDER: WorkflowActionId[] = ['extract_json_from_pdf', 'edit_json', 'upgrade_json'];
+const WORKFLOW_EXECUTION_ORDER: WorkflowActionId[] = ['extract_json_from_pdf', 'edit_json', 'upgrade_json', 'text_finder'];
+const WORD_COUNT_THRESHOLD_HINT =
+  'Minimum words per block for keyword matching. Increase it to ignore short headings or labels.';
 
 type SelectedTarget =
   | { kind: 'block'; blockIndex: number }
@@ -67,9 +69,14 @@ type WorkflowQueueItem = {
   pdf2dataLayoutModel: string;
   pdf2dataTableModel: string;
   upgradeMode: UpgradeMode;
+  textFinderWordCountThreshold: number;
+  textFinderFindParagraphs: boolean;
+  textFinderFindSectionHeaders: boolean;
+  textFinderCountDuplicates: boolean;
   selected: boolean;
 };
 
+// Main application component orchestrating extraction, editing, upgrading, and export workflows.
 const App = () => {
   const [docData, setDocData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -86,6 +93,14 @@ const App = () => {
   const [activeWorkflowView, setActiveWorkflowView] = useState<'executed' | 'queue'>('executed');
   const [pendingBatchResumeQueue, setPendingBatchResumeQueue] = useState<WorkflowQueueItem[] | null>(null);
   const [upgradeMode, setUpgradeMode] = useState<UpgradeMode>('both');
+  const [textFinderWordCountThreshold, setTextFinderWordCountThreshold] = useState<number>(6);
+  const [textFinderFindParagraphs, setTextFinderFindParagraphs] = useState(true);
+  const [textFinderFindSectionHeaders, setTextFinderFindSectionHeaders] = useState(true);
+  const [textFinderCountDuplicates, setTextFinderCountDuplicates] = useState(false);
+  const [textFinderKeywordsFile, setTextFinderKeywordsFile] = useState<File | null>(null);
+  const [textFinderKeywordsFileName, setTextFinderKeywordsFileName] = useState('No file selected');
+  const [textFinderArtifact, setTextFinderArtifact] = useState<any | null>(null);
+  const [textFinderArtifactLabel, setTextFinderArtifactLabel] = useState('No highlighted artifact yet');
   const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
   const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<'workflow' | 'artifacts' | 'editor'>('workflow');
@@ -148,6 +163,7 @@ const App = () => {
     void continueBatchWorkflow(queueToResume);
   }, [pendingBatchResumeQueue, actionInProgress, editSessionEnabled]);
 
+  // Show transient feedback messages in the JSON editor panel.
   const showEditorFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
     setEditorFeedback({ type, message });
     if (timeout > 0) {
@@ -155,6 +171,7 @@ const App = () => {
     }
   };
 
+  // Show transient feedback messages in the export panel.
   const showExportFeedback = (type: 'success' | 'error' | 'info', message: string, timeout = 3200) => {
     setExportFeedback({ type, message });
     if (exportFeedbackTimeoutRef.current !== null) {
@@ -177,6 +194,7 @@ const App = () => {
     };
   }, []);
 
+  // Reset workflow state and clear all loaded artifacts and UI selections.
   const resetWorkflow = () => {
     setDocData(null);
     workflowJsonRef.current = null;
@@ -192,6 +210,14 @@ const App = () => {
     setBatchStatusDetail('No batch run started yet.');
     setPendingBatchResumeQueue(null);
     setUpgradeMode('both');
+    setTextFinderWordCountThreshold(6);
+    setTextFinderFindParagraphs(true);
+    setTextFinderFindSectionHeaders(true);
+    setTextFinderCountDuplicates(false);
+    setTextFinderKeywordsFile(null);
+    setTextFinderKeywordsFileName('No file selected');
+    setTextFinderArtifact(null);
+    setTextFinderArtifactLabel('No highlighted artifact yet');
     setWorkflowPath([]);
     setWorkflowMessage(null);
     setActiveWorkflowView('executed');
@@ -214,6 +240,7 @@ const App = () => {
     setOutputFolderName('No folder selected');
   };
 
+  // Ask for confirmation before resetting the current workflow state.
   const confirmAndResetWorkflow = () => {
     const shouldReset = window.confirm('Discard current edits and choose another PDF?');
     if (!shouldReset) return;
@@ -244,9 +271,11 @@ const App = () => {
       (parsedData && Array.isArray(parsedData.blocks)),
   );
   const hasUpgradedArtifact = Boolean(upgradedJson);
+  const hasTextFinderArtifact = Boolean(textFinderArtifact && Array.isArray(textFinderArtifact.blocks));
   const isActionInProgress = actionInProgress !== null;
   const showJsonOverlays = hasJsonArtifact;
 
+  // Resolve the most recent JSON artifact available for downstream actions.
   const getWorkflowJsonArtifact = () => {
     const refArtifact = workflowJsonRef.current;
     if (refArtifact && Array.isArray(refArtifact.blocks)) return refArtifact;
@@ -256,13 +285,41 @@ const App = () => {
     return null;
   };
 
+  // Determine whether a workflow action has the required prerequisites.
   const canRunAction = (action: WorkflowActionId) => {
     if (action === 'extract_json_from_pdf') return hasPdfArtifact;
     if (action === 'edit_json') return hasJsonArtifact;
     if (action === 'upgrade_json') return hasJsonArtifact;
+    if (action === 'text_finder') {
+      return hasJsonArtifact && Boolean(textFinderKeywordsFile);
+    }
     return false;
   };
 
+  // Parse and normalize a keywords JSON file into weighted keyword entries.
+  const parseTextFinderKeywordsFile = async (file: File): Promise<Record<string, number>> => {
+    const raw = await file.text();
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Keywords file must be a JSON object: { "keyword": weight }.');
+    }
+
+    const normalized: Record<string, number> = {};
+    for (const [rawKey, rawWeight] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = String(rawKey || '').trim();
+      if (!key) continue;
+      const weight = Number(rawWeight);
+      if (!Number.isFinite(weight)) continue;
+      normalized[key] = (normalized[key] ?? 0) + weight;
+    }
+
+    if (!Object.keys(normalized).length) {
+      throw new Error('Keywords file has no valid keyword weights.');
+    }
+    return normalized;
+  };
+
+  // Append a timestamped execution step to the workflow timeline.
   const appendWorkflowPath = (action: WorkflowActionId, status: 'done' | 'failed' | 'skipped', detail?: string) => {
     const item: WorkflowPathItem = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -278,6 +335,7 @@ const App = () => {
   useEffect(() => {
     let cancelled = false;
 
+    // Fetch processor capabilities from backend and apply fallback defaults if needed.
     const loadProcessors = async () => {
       try {
         const response = await fetch(`${API_BASE}/api/processors`);
@@ -354,6 +412,7 @@ const App = () => {
     setSelectedContent(typeof block?.content === 'string' ? block.content : '');
   }, [selectedTarget, parsedData]);
 
+  // Load an imported PDF file and reset state for a fresh workflow run.
   const handleImportPdf = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -382,11 +441,14 @@ const App = () => {
     setHasEditedJson(false);
     setEditedJson(null);
     setUpgradedJson(null);
+    setTextFinderKeywordsFile(null);
+    setTextFinderKeywordsFileName('No file selected');
     setActiveSidebarTab('workflow');
     setWorkflowPath([]);
     e.target.value = '';
   };
 
+  // Execute PDF extraction and store returned JSON/asset metadata.
   const runExtractJsonAction = async () => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
@@ -438,6 +500,8 @@ const App = () => {
       setHasEditedJson(false);
       setEditedJson(null);
       setUpgradedJson(null);
+      setTextFinderArtifact(null);
+      setTextFinderArtifactLabel('No highlighted artifact yet');
       return true;
     } catch (err: any) {
       console.error(err);
@@ -452,6 +516,7 @@ const App = () => {
     }
   };
 
+  // Start the interactive JSON editing action for selected blocks.
   const runEditJsonAction = (skipJsonAvailabilityCheck = false) => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
@@ -480,6 +545,7 @@ const App = () => {
     return true;
   };
 
+  // Execute the backend JSON upgrade action using the selected upgrade mode.
   const runUpgradeJsonAction = async () => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
@@ -543,6 +609,101 @@ const App = () => {
     }
   };
 
+  // Execute text finder matching and update overlays with highlighted blocks.
+  const runTextFinderAction = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return false;
+    }
+
+    setActionInProgress('text_finder');
+    setLoading(true);
+    try {
+      const workflowArtifact = getWorkflowJsonArtifact();
+      if (!workflowArtifact) {
+        const message = 'Run Extract JSON first.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('text_finder', 'failed', message);
+        return false;
+      }
+
+      if (!textFinderKeywordsFile) {
+        const message = 'Upload a keywords JSON file before generating a highlighted artifact.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('text_finder', 'failed', message);
+        return false;
+      }
+
+      if (!textFinderFindParagraphs && !textFinderFindSectionHeaders) {
+        const message = 'Enable paragraph and/or section_header matching.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('text_finder', 'failed', message);
+        return false;
+      }
+
+      const keywords = await parseTextFinderKeywordsFile(textFinderKeywordsFile);
+
+      const response = await fetch(`${API_BASE}/api/actions/text-finder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: workflowArtifact,
+          keywords,
+          word_count_threshold: textFinderWordCountThreshold,
+          find_paragraphs: textFinderFindParagraphs,
+          find_section_headers: textFinderFindSectionHeaders,
+          count_duplicates: textFinderCountDuplicates,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.detail || `text finder request failed (${response.status})`);
+      }
+
+      const highlightedArtifact = payload?.data;
+      const beforeCount = Number(payload?.summary?.blocks_before ?? 0);
+      const afterCount = Number(payload?.summary?.highlighted_count ?? payload?.summary?.blocks_after ?? 0);
+
+      if (!highlightedArtifact || !Array.isArray(highlightedArtifact?.blocks)) {
+        throw new Error('backend returned invalid text finder payload');
+      }
+
+      if (afterCount === 0) {
+        setWorkflowMessage({
+          type: 'info',
+          message: `Text Finder found no matches. Kept current overlays (${beforeCount} blocks).`,
+        });
+        appendWorkflowPath('text_finder', 'done', `0 matches | kept ${beforeCount} blocks`);
+        return true;
+      }
+
+      setTextFinderArtifact(highlightedArtifact);
+      setTextFinderArtifactLabel(`Highlighted artifact generated from ${textFinderKeywordsFile.name}`);
+      workflowJsonRef.current = highlightedArtifact;
+      setJsonDraft(JSON.stringify(highlightedArtifact, null, 2));
+      setSelectedTarget(null);
+      setSelectedContent('');
+      setActiveSidebarTab('artifacts');
+      setWorkflowMessage({
+        type: 'success',
+        message: `Text Finder completed. Highlighted: ${afterCount} block(s) out of ${beforeCount}.`,
+      });
+      appendWorkflowPath('text_finder', 'done', `highlighted ${afterCount}/${beforeCount}`);
+      return true;
+    } catch (err: any) {
+      console.error(err);
+      const message = `Action failed: ${err.message || 'unknown error'}`;
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('text_finder', 'failed', message);
+      return false;
+    } finally {
+      setLoading(false);
+      setActionInProgress(null);
+    }
+  };
+
+  // Continue running queued workflow actions sequentially, pausing for manual edit steps.
   const continueBatchWorkflow = async (queueOverride?: WorkflowQueueItem[]) => {
     let queue = queueOverride ?? workflowQueue;
     let extractedInThisBatchRun = false;
@@ -566,6 +727,10 @@ const App = () => {
       setPdf2dataLayoutModel(nextItem.pdf2dataLayoutModel);
       setPdf2dataTableModel(nextItem.pdf2dataTableModel);
       setUpgradeMode(nextItem.upgradeMode);
+      setTextFinderWordCountThreshold(nextItem.textFinderWordCountThreshold);
+      setTextFinderFindParagraphs(nextItem.textFinderFindParagraphs);
+      setTextFinderFindSectionHeaders(nextItem.textFinderFindSectionHeaders);
+      setTextFinderCountDuplicates(nextItem.textFinderCountDuplicates);
       setSelectedAction(nextAction);
 
       if (nextAction === 'edit_json') {
@@ -593,7 +758,14 @@ const App = () => {
         return;
       }
 
-      const ok = nextAction === 'extract_json_from_pdf' ? await runExtractJsonAction() : await runUpgradeJsonAction();
+      let ok = false;
+      if (nextAction === 'extract_json_from_pdf') {
+        ok = await runExtractJsonAction();
+      } else if (nextAction === 'upgrade_json') {
+        ok = await runUpgradeJsonAction();
+      } else if (nextAction === 'text_finder') {
+        ok = await runTextFinderAction();
+      }
       if (!ok) {
         setIsBatchRunning(false);
         setWorkflowQueue([]);
@@ -621,6 +793,7 @@ const App = () => {
     setWorkflowMessage({ type: 'success', message: 'Selected workflow completed.' });
   };
 
+  // Start batch execution for currently selected queued actions.
   const runBatchWorkflow = async () => {
     if (isActionInProgress) {
       setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
@@ -650,6 +823,7 @@ const App = () => {
     await continueBatchWorkflow(runnableQueue);
   };
 
+  // Add the currently selected action and its options to the workflow queue.
   const addSelectedActionToWorkflow = () => {
     if (isActionInProgress || isBatchRunning) return;
 
@@ -664,6 +838,10 @@ const App = () => {
         pdf2dataLayoutModel,
         pdf2dataTableModel,
         upgradeMode,
+        textFinderWordCountThreshold,
+        textFinderFindParagraphs,
+        textFinderFindSectionHeaders,
+        textFinderCountDuplicates,
         selected: true,
       };
       setActiveWorkflowView('queue');
@@ -672,6 +850,7 @@ const App = () => {
     });
   };
 
+  // Toggle whether a queued action should run in the next batch execution.
   const toggleQueuedActionSelected = (actionId: WorkflowActionId) => {
     if (isBatchRunning) return;
     setPlannedWorkflow((prev) =>
@@ -681,17 +860,20 @@ const App = () => {
     );
   };
 
+  // Remove a specific action from the queued workflow list.
   const removeQueuedAction = (actionId: WorkflowActionId) => {
     if (isBatchRunning) return;
     setPlannedWorkflow((prev) => prev.filter((item) => item.actionId !== actionId));
   };
 
+  // Clear all actions from the current workflow queue.
   const clearWorkflowQueue = () => {
     if (isBatchRunning) return;
     setPlannedWorkflow([]);
     setWorkflowMessage({ type: 'info', message: 'Workflow queue cleared.' });
   };
 
+  // Run the currently selected action outside of batch mode.
   const runSelectedAction = async () => {
     if (isBatchRunning) {
       setWorkflowMessage({ type: 'info', message: 'Batch workflow is running. Finish it before manual action execution.' });
@@ -711,9 +893,14 @@ const App = () => {
       runEditJsonAction();
       return;
     }
-    await runUpgradeJsonAction();
+    if (selectedAction === 'upgrade_json') {
+      await runUpgradeJsonAction();
+      return;
+    }
+    await runTextFinderAction();
   };
 
+  // Update pagination state after the PDF document finishes loading.
   const onDocumentLoadSuccess = ({ numPages: totalPages }: { numPages: number }) => {
     setNumPages(totalPages);
     setCurrentPage((prev) => {
@@ -728,6 +915,7 @@ const App = () => {
     });
   };
 
+  // Capture page dimensions and scale used to render overlay coordinates.
   const onPageLoadSuccess = (pageNumber: number, page: any) => {
     const viewport = page.getViewport({ scale: 1.5 });
     const nextScale = viewport.width / page.originalWidth;
@@ -742,6 +930,7 @@ const App = () => {
     }));
   };
 
+  // Update editable text content for the currently selected target.
   const updateSelectedContent = (value: string) => {
     if (!editSessionEnabled) {
       showEditorFeedback('info', 'Run the "Edit JSON" action to enable editing.', 2600);
@@ -750,6 +939,7 @@ const App = () => {
     setSelectedContent(value);
   };
 
+  // Persist edits for the selected block/cell/caption to backend canonical JSON.
   const applyBlockChanges = async () => {
     if (!editSessionEnabled || !selectedTarget || !parsedData) return;
 
@@ -789,6 +979,7 @@ const App = () => {
     }
   };
 
+  // Finalize edit mode, commit edited JSON, and optionally resume batch execution.
   const finalizeEditedJson = async () => {
     if (actionInProgress !== 'edit_json') return;
     if (!parsedData) {
@@ -824,6 +1015,7 @@ const App = () => {
     }
   };
 
+  // Export canonical JSON artifacts and related image assets to selected folder.
   const exportJson = async () => {
     if (!parsedData) return;
     if (!outputFolderHandle) {
@@ -841,6 +1033,7 @@ const App = () => {
     const baseSnapshot = JSON.parse(JSON.stringify(docData ?? parsedData));
     const editedSnapshot = hasEditedJson && editedJson ? JSON.parse(JSON.stringify(editedJson)) : null;
     const upgradedSnapshot = upgradedJson ? JSON.parse(JSON.stringify(upgradedJson)) : null;
+    const textFinderSnapshot = textFinderArtifact ? JSON.parse(JSON.stringify(textFinderArtifact)) : null;
 
     try {
       const folderName = safeName || 'metadata';
@@ -900,6 +1093,7 @@ const App = () => {
         }
       }
 
+      // Rewrite block filepaths to exported relative asset locations.
       const rewriteAssetPaths = (snapshot: any) => {
         if (!Array.isArray(snapshot?.blocks)) return;
         for (const block of snapshot.blocks) {
@@ -928,6 +1122,7 @@ const App = () => {
       const filesToWrite: Array<{ name: string; data: any; canonical: any }> = [];
       const seenCanonical = new Set<string>();
 
+      // Add a snapshot to export list only when canonical content differs.
       const pushIfUnique = (name: string, data: any) => {
         const canonical = toCanonicalContentJson(data);
         const serialized = JSON.stringify(canonical);
@@ -945,6 +1140,10 @@ const App = () => {
 
       if (upgradedSnapshot) {
         pushIfUnique(`${folderName}_upgraded_content.json`, upgradedSnapshot);
+      }
+
+      if (textFinderSnapshot) {
+        pushIfUnique(`${folderName}_text_finder_content.json`, textFinderSnapshot);
       }
 
       for (const item of filesToWrite) {
@@ -966,6 +1165,7 @@ const App = () => {
     }
   };
 
+  // Open folder picker and store the output directory handle for exports.
   const chooseOutputFolder = async () => {
     const pickerWindow = window as Window & {
       showDirectoryPicker?: (options?: {
@@ -1018,6 +1218,7 @@ const App = () => {
     window.scrollTo({ top: savedWindowScrollTopRef.current, behavior: 'auto' });
   }, [currentPage, pageRefreshTick]);
 
+  // Navigate to a page while preserving viewer/window scroll positions.
   const navigateToPage = (nextPage: number) => {
     const container = pdfViewerScrollRef.current;
     if (container) {
@@ -1028,14 +1229,17 @@ const App = () => {
     setCurrentPage(Math.min(Math.max(1, nextPage), numPages || 1));
   };
 
+  // Move to the previous page in the PDF preview.
   const goToPreviousPage = () => {
     navigateToPage(currentPage - 1);
   };
 
+  // Move to the next page in the PDF preview.
   const goToNextPage = () => {
     navigateToPage(currentPage + 1);
   };
 
+  // Validate and apply user-entered page jump values.
   const submitPageJump = () => {
     const parsed = Number(pageJumpValue);
     if (!Number.isFinite(parsed)) {
@@ -1045,6 +1249,28 @@ const App = () => {
     navigateToPage(Math.floor(parsed));
   };
 
+  // Load a keywords file for text-finder matching and show status feedback.
+  const handleTextFinderKeywordsFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setTextFinderKeywordsFile(file);
+    setTextFinderKeywordsFileName(file?.name || 'No file selected');
+    if (file) {
+      setWorkflowMessage({ type: 'info', message: `Loaded keywords file: ${file.name}` });
+    }
+    e.target.value = '';
+  };
+
+  // Build hover title text for highlighted text-finder overlays.
+  const buildTextFinderTitle = (block: any) => {
+    if (!block?.text_finder_highlighted) return '';
+    const score = Number(block?.text_finder_match_score ?? 0);
+    if (Number.isFinite(score) && score > 0) {
+      return `Text Finder score: ${score}`;
+    }
+    return 'Text Finder match';
+  };
+
+  // Render the right-rail workflow history and queue controls.
   const renderWorkflowRail = () => {
     const batchStatusBadgeClass =
       batchStatus === 'running'
@@ -1231,6 +1457,7 @@ const App = () => {
     );
   };
 
+  // Render the actions column with per-action settings and controls.
   const renderActionsColumn = () => (
     <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-5 h-full flex flex-col gap-5">
       <div>
@@ -1248,12 +1475,19 @@ const App = () => {
               <option value="extract_json_from_pdf">Extract JSON from PDF</option>
               <option value="edit_json">Edit JSON</option>
               <option value="upgrade_json">Upgrade JSON</option>
+              <option value="text_finder">Text Finder</option>
             </select>
           </div>
 
-          {(selectedAction === 'extract_json_from_pdf' || selectedAction === 'upgrade_json') && (
+          {(selectedAction === 'extract_json_from_pdf' || selectedAction === 'upgrade_json' || selectedAction === 'text_finder') && (
             <div>
-              <label className="block text-xs text-zinc-400 mb-2">Processor / model</label>
+              <label className="block text-xs text-zinc-400 mb-2">
+                {selectedAction === 'extract_json_from_pdf'
+                  ? 'Processor / model'
+                  : selectedAction === 'upgrade_json'
+                  ? 'Upgrade mode'
+                  : 'Text finder settings'}
+              </label>
               {selectedAction === 'extract_json_from_pdf' ? (
                 <>
                   <select
@@ -1303,16 +1537,68 @@ const App = () => {
                   )}
                 </>
               ) : (
-                <select
-                  value={upgradeMode}
-                  onChange={(e) => setUpgradeMode(e.target.value as UpgradeMode)}
-                  disabled={isActionInProgress}
-                  className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                >
-                  <option value="both">{UPGRADE_MODE_LABELS.both}</option>
-                  <option value="text">{UPGRADE_MODE_LABELS.text}</option>
-                  <option value="figures">{UPGRADE_MODE_LABELS.figures}</option>
-                </select>
+                <div className="grid gap-3 min-w-0">
+                  <div className="min-w-0">
+                    <label className="block text-xs text-zinc-400 mb-2">Keywords JSON file</label>
+                    <label className="flex items-center justify-center gap-2 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 cursor-pointer hover:bg-zinc-700 transition-colors overflow-hidden box-border">
+                      <FolderOpen className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0 truncate">Keywords file</span>
+                      <input type="file" accept=".json,application/json" className="hidden" onChange={handleTextFinderKeywordsFile} />
+                    </label>
+                    <div className="mt-2 text-[11px] text-zinc-500 break-all leading-snug">{textFinderKeywordsFileName}</div>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="block text-xs text-zinc-400">Word count threshold</label>
+                      <span className="relative inline-flex group">
+                        <Info className="h-4 w-4 text-zinc-500 cursor-help" aria-label={WORD_COUNT_THRESHOLD_HINT} />
+                        <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-64 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2 text-[11px] leading-snug text-zinc-200 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+                          {WORD_COUNT_THRESHOLD_HINT}
+                        </span>
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={textFinderWordCountThreshold}
+                      onChange={(e) => setTextFinderWordCountThreshold(Number(e.target.value || 0))}
+                      disabled={isActionInProgress}
+                      style={{ colorScheme: 'dark' }}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={textFinderFindParagraphs}
+                      onChange={(e) => setTextFinderFindParagraphs(e.target.checked)}
+                      disabled={isActionInProgress}
+                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                    />
+                    Find paragraph blocks
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={textFinderFindSectionHeaders}
+                      onChange={(e) => setTextFinderFindSectionHeaders(e.target.checked)}
+                      disabled={isActionInProgress}
+                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                    />
+                    Find section headers
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={textFinderCountDuplicates}
+                      onChange={(e) => setTextFinderCountDuplicates(e.target.checked)}
+                      disabled={isActionInProgress}
+                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                    />
+                    Count duplicate keyword occurrences
+                  </label>
+                </div>
               )}
             </div>
           )}
@@ -1322,7 +1608,13 @@ const App = () => {
             disabled={loading || isActionInProgress || isBatchRunning || !canRunAction(selectedAction)}
             className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white py-3 rounded-xl font-semibold transition-all"
           >
-            {actionInProgress === 'edit_json' ? 'Edit action in progress' : loading ? 'Running action...' : 'Run action'}
+            {actionInProgress === 'edit_json'
+              ? 'Edit action in progress'
+              : loading
+              ? 'Running action...'
+              : selectedAction === 'text_finder'
+              ? 'Generate highlighted artifact'
+              : 'Run action'}
           </button>
 
           <button
@@ -1336,7 +1628,7 @@ const App = () => {
 
         {workflowMessage && (
           <div
-            className={`mt-4 text-xs p-3 rounded-xl border ${
+            className={`mt-4 text-xs p-3 rounded-xl border wrap-break-word ${
               workflowMessage.type === 'error'
                 ? 'text-red-200 bg-red-950/40 border-red-900'
                 : workflowMessage.type === 'success'
@@ -1440,6 +1732,7 @@ const App = () => {
     </div>
   );
 
+  // Render PDF page preview and interactive overlay boxes.
   const renderPdfViewerPanel = () => {
     if (!pdfFile) {
       return (
@@ -1490,6 +1783,7 @@ const App = () => {
                       const width = (x2 - x1) * pageSizes[currentPage].scale;
                       const height = (y2 - y1) * pageSizes[currentPage].scale;
                       const isSelectedBlock = selectedTarget?.kind === 'block' && selectedTarget.blockIndex === index;
+                      const isTextFinderHighlighted = Boolean(block?.text_finder_highlighted);
 
                       if (isTableWithGrid(block)) {
                         const tableRows = Array.isArray(block.block) ? block.block : [];
@@ -1534,19 +1828,25 @@ const App = () => {
                                   <div
                                     key={`${index}-cell-${rowIdx}-${colIdx}`}
                                     className={`absolute overflow-hidden transition-colors ${
-                                      editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
+                                      editSessionEnabled
+                                        ? 'pointer-events-auto cursor-pointer'
+                                        : isTextFinderHighlighted
+                                        ? 'pointer-events-auto cursor-help opacity-60'
+                                        : 'pointer-events-none cursor-default opacity-60'
                                     } ${
                                       cellSelected
-                                        ? 'border-2 border-emerald-300 bg-emerald-300/20'
-                                        : 'border border-emerald-400/80 bg-emerald-400/10 hover:bg-emerald-400/20'
+                                        ? 'border-2 border-amber-300 bg-amber-300/20'
+                                        : isTextFinderHighlighted
+                                        ? 'border border-orange-300/90 bg-orange-300/22 hover:bg-orange-300/32'
+                                        : 'border border-blue-400/80 bg-blue-400/10'
                                     }`}
+                                                                        title={buildTextFinderTitle(block)}
                                     style={{
                                       left: cx1 * pageSizes[currentPage].scale,
                                       top: cy1 * pageSizes[currentPage].scale,
                                       width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
                                       height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
                                     }}
-                                    title={`Table cell R${rowIdx + 1} C${colIdx + 1}`}
                                     onClick={() => {
                                       if (!editSessionEnabled) {
                                         setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
@@ -1565,19 +1865,25 @@ const App = () => {
                                 <div
                                   key={`${index}-caption-${captionIdx}`}
                                   className={`absolute overflow-hidden transition-colors ${
-                                    editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
+                                    editSessionEnabled
+                                      ? 'pointer-events-auto cursor-pointer'
+                                      : isTextFinderHighlighted
+                                      ? 'pointer-events-auto cursor-help opacity-60'
+                                      : 'pointer-events-none cursor-default opacity-60'
                                   } ${
                                     selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index && selectedTarget.captionIndex === captionIdx
-                                      ? 'border-2 border-fuchsia-300 bg-fuchsia-300/20'
-                                      : 'border border-fuchsia-400/80 bg-fuchsia-400/10 hover:bg-fuchsia-400/20'
+                                      ? 'border-2 border-amber-300 bg-amber-300/20'
+                                      : isTextFinderHighlighted
+                                      ? 'border border-orange-300/90 bg-orange-300/22 hover:bg-orange-300/32'
+                                      : 'border border-blue-400/80 bg-blue-400/10'
                                   }`}
+                                                                    title={buildTextFinderTitle(block)}
                                   style={{
                                     left: cx1 * pageSizes[currentPage].scale,
                                     top: cy1 * pageSizes[currentPage].scale,
                                     width: Math.max(8, (cx2 - cx1) * pageSizes[currentPage].scale),
                                     height: Math.max(8, (cy2 - cy1) * pageSizes[currentPage].scale),
                                   }}
-                                  title="Table caption"
                                   onClick={() => {
                                     if (!editSessionEnabled) {
                                       setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
@@ -1596,14 +1902,20 @@ const App = () => {
                         <div
                           key={index}
                           className={`absolute overflow-hidden transition-colors ${
-                            editSessionEnabled ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default opacity-60'
+                            editSessionEnabled
+                              ? 'pointer-events-auto cursor-pointer'
+                              : isTextFinderHighlighted
+                              ? 'pointer-events-auto cursor-help opacity-60'
+                              : 'pointer-events-none cursor-default opacity-60'
                           } ${
                             isSelectedBlock
                               ? 'border-2 border-amber-300 bg-amber-300/20'
-                              : 'border border-blue-400/80 bg-blue-400/10 hover:bg-blue-400/20'
+                              : isTextFinderHighlighted
+                              ? 'border-2 border-orange-300 bg-orange-300/20 hover:bg-orange-300/30'
+                              : 'border border-blue-400/80 bg-blue-400/10'
                           }`}
                           style={{ left, top, width, height }}
-                          title={block?.content || `Block ${index}`}
+                          title={buildTextFinderTitle(block)}
                           onClick={() => {
                             if (!editSessionEnabled) {
                               setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
@@ -1660,6 +1972,7 @@ const App = () => {
     );
   };
 
+  // Render artifact availability badges for current workflow state.
   const renderArtifactsBar = () => (
     <div className="w-full mb-3">
       <div className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-4 flex items-center gap-4 flex-wrap">
@@ -1685,6 +1998,7 @@ const App = () => {
     </div>
   );
 
+  // Render export controls and status feedback panel.
   const renderExportCard = () => (
     <div style={{ width: RIGHT_RAIL_WIDTH_PX }} className="bg-zinc-900 border border-zinc-800 rounded-3xl shadow-xl p-4">
       <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold mb-3">Export</div>

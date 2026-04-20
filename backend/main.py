@@ -7,6 +7,7 @@ import importlib.util
 import os
 import sys
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -39,10 +40,12 @@ _safe_int = safe_int
 _safe_float = safe_float
 
 
+# Persist extracted image assets into the shared asset cache.
 def _persist_extracted_assets(file_id: str, output_tmp: str) -> int:
     return persist_extracted_assets(file_id=file_id, output_tmp=output_tmp, asset_root=ASSET_CACHE_ROOT)
 
 
+# List cached asset paths for a specific extracted document.
 def _list_cached_assets(doc_id: str) -> list[str]:
     return list_cached_assets(doc_id=doc_id, asset_root=ASSET_CACHE_ROOT)
 
@@ -61,6 +64,15 @@ class UpgradePayload(BaseModel):
     data: dict
     mode: str = "both"
     distance_threshold: float = 50.0
+
+
+class TextFinderPayload(BaseModel):
+    data: dict
+    keywords: dict[str, Any]
+    word_count_threshold: float = 6.0
+    find_paragraphs: bool = True
+    find_section_headers: bool = True
+    count_duplicates: bool = False
 
 
 class EditTarget(BaseModel):
@@ -133,6 +145,7 @@ PDF2DATA_LAYOUT_MODELS = {
 }
 
 
+# Fail early when optional pipeline modules are missing in the runtime.
 def _require_modules(module_names: list[str], pipeline_name: str) -> None:
     missing = [name for name in module_names if importlib.util.find_spec(name) is None]
     if missing:
@@ -141,6 +154,7 @@ def _require_modules(module_names: list[str], pipeline_name: str) -> None:
         )
 
 
+# Validate torch/torchvision runtime compatibility before running ML pipelines.
 def _require_torchvision_runtime() -> None:
     try:
         import torch  # noqa: F401
@@ -159,6 +173,7 @@ def _require_torchvision_runtime() -> None:
         ) from exc
 
 
+# Normalize heterogeneous raw blocks to a consistent editor-friendly schema.
 def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
     normalized: list[dict] = []
     for idx, block in enumerate(raw_blocks):
@@ -174,6 +189,8 @@ def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
         if content in (None, ""):
             content = block.get("legend") or block.get("caption") or block_type
 
+        normalized_type = normalize_layout_label(block_type)
+
         normalized.append(
             {
                 **block,
@@ -182,7 +199,7 @@ def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
                 "box": [float(c) for c in box],
                 "originalBox": [float(c) for c in box],
                 "content": str(content or ""),
-                "type": normalize_layout_label(block_type),
+                "type": normalized_type,
                 "layout_type": str(block.get("layout_type") or block_type or normalize_layout_label(block_type)),
                 "font_size": safe_float(block.get("font_size", 11.0), 11.0),
                 "color": block.get("color", (0, 0, 0)),
@@ -193,6 +210,7 @@ def _normalize_raw_blocks(raw_blocks: list[dict], source: str) -> list[dict]:
     return normalized
 
 
+# Run MinerU CLI extraction and normalize produced blocks.
 def _extract_with_mineru_cli(input_tmp: str, output_tmp: str) -> list[dict]:
     mineru_cli = shutil.which("mineru") or shutil.which("magic-pdf")
     if mineru_cli is None:
@@ -308,6 +326,7 @@ def _extract_with_pdf2data_cli(
     layout_model_threshold: str = "0.7",
     table_model_threshold: str = "0.5",
 ) -> list[dict]:
+    # Run pdf2data CLI extraction with optional layout/table model controls.
     # Always run in the same interpreter as the API process to avoid venv/path mismatches.
     base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
     
@@ -410,6 +429,7 @@ def _extract_with_pdf2data_cli(
 
 
 def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+    # Run Docling via pdf2data CLI and normalize extracted blocks.
     # Always run in the same interpreter as the API process to avoid venv/path mismatches.
     base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
 
@@ -468,6 +488,7 @@ def _extract_with_docling_cli(input_tmp: str, output_tmp: str) -> list[dict]:
 
 
 def _extract_with_mineru_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[dict]:
+    # Run MinerU through the pdf2data wrapper path to preserve table metadata fields.
     # Match the same execution path used by pdf2data-tools so table metadata
     # (block/cell_boxes/caption_box) is preserved when MinerU is selected.
     base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
@@ -525,6 +546,7 @@ def _extract_with_mineru_pdf2data_cli(input_tmp: str, output_tmp: str) -> list[d
     return _normalize_raw_blocks(raw_blocks, source="mineru")
 
 
+# Backward-compatible extraction entrypoint using default pipeline options.
 def _extract_with_pipeline(input_tmp: str, output_tmp: str, processor_alias: str) -> list[dict]:
     return _extract_with_pipeline_options(
         input_tmp=input_tmp,
@@ -542,6 +564,7 @@ def _extract_with_pipeline_options(
     pdf2data_layout_model: str = PDF2DATA_LAYOUT_AUTO,
     pdf2data_table_model: str | None = None,
 ) -> list[dict]:
+    # Route extraction requests to the selected processor implementation.
     pipeline_name = FRIENDLY_PROCESSOR_ALIASES[processor_alias]
 
     if pipeline_name == "NotDefined":
@@ -598,11 +621,13 @@ def _extract_with_pipeline_options(
         raise RuntimeError(f"Unsupported pipeline: {pipeline_name}")
 
 
+# Keep only upgrade-eligible blocks with valid page and box coordinates.
 def _prepare_blocks_for_upgrade(blocks: list[Any]) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     for raw in blocks:
         if not isinstance(raw, dict):
             continue
+        # Keep only upgrade-eligible blocks with valid page and box coordinates.
 
         box = raw.get("box")
         if not isinstance(box, list) or len(box) != 4:
@@ -628,7 +653,98 @@ def _prepare_blocks_for_upgrade(blocks: list[Any]) -> list[dict[str, Any]]:
     return prepared
 
 
+# Normalize and aggregate keyword weights from user-provided JSON.
+def _normalize_text_finder_keywords(raw_keywords: dict[str, Any]) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for raw_key, raw_weight in raw_keywords.items():
+        key = str(raw_key or "").strip().lower()
+        if not key:
+            continue
+
+        try:
+            weight = float(raw_weight)
+        except Exception:
+            continue
+
+        normalized[key] = normalized.get(key, 0.0) + weight
+    return normalized
+
+
+# Serialize a payload as UTF-8 JSON at the given path.
+def _write_json_file(path: Path, payload: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _extract_with_text_finder_cli(
+    input_tmp: str,
+    output_tmp: str,
+    keywords_file: str,
+    word_count_threshold: int,
+    find_paragraphs: bool,
+    find_section_headers: bool,
+    count_duplicates: bool,
+) -> list[str]:
+    # Delegate text finder matching to the upstream pdf2data CLI module.
+    cmd = [
+        sys.executable,
+        "-m",
+        "pdf2data.cli.text_finder",
+        input_tmp,
+        output_tmp,
+        keywords_file,
+        "--word_count_threshold",
+        str(int(word_count_threshold)),
+        "--find_paragraphs",
+        "true" if find_paragraphs else "false",
+        "--find_section_headers",
+        "true" if find_section_headers else "false",
+        "--count_duplicates",
+        "true" if count_duplicates else "false",
+    ]
+
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("Text Finder execution failed via pdf2data CLI.")
+
+    results_path = Path(output_tmp) / "found_texts.txt"
+    if not results_path.exists():
+        return []
+
+    with open(results_path, "r", encoding="utf-8") as f:
+        return [line.rstrip("\n") for line in f if line.strip()]
+
+
+# Annotate blocks with highlight and match-score metadata from matched texts.
+def _annotate_text_finder_blocks(blocks: list[dict[str, Any]], matched_texts: list[str]) -> tuple[list[dict[str, Any]], int]:
+    content_scores = Counter(text.strip().replace("\n", " ") for text in matched_texts if str(text).strip())
+    remaining = Counter(content_scores)
+    annotated: list[dict[str, Any]] = []
+    highlighted_count = 0
+
+    for block in blocks:
+        content = str(block.get("content") or "").replace("\n", " ").strip()
+        if not content:
+            annotated.append({**block, "text_finder_highlighted": False, "text_finder_match_score": 0})
+            continue
+
+        match_score = int(content_scores.get(content, 0))
+        is_highlighted = remaining.get(content, 0) > 0
+        if is_highlighted:
+            remaining[content] -= 1
+            highlighted_count += 1
+
+        annotated.append({
+            **block,
+            "text_finder_highlighted": is_highlighted,
+            "text_finder_match_score": match_score if is_highlighted else 0,
+        })
+
+    return annotated, highlighted_count
+
+
 @app.get("/api/processors")
+# Return available processors with their enabled state for the frontend selector.
 async def list_processors():
     default_processor = next(
         (item["alias"] for item in PROCESSOR_CATALOG if item.get("enabled")),
@@ -648,6 +764,7 @@ async def list_processors():
     }
 
 @app.post("/api/upload")
+# Extract PDF content blocks using the selected processor and return canonical JSON.
 async def upload_and_process(
     file: UploadFile = File(...),
     processor: str = Form("pdf2data"),
@@ -738,6 +855,7 @@ async def upload_and_process(
                 "blocks": blocks_data,
                 "pdf_size": pdf_size,
                 "page_sizes": page_sizes,
+                    # Return available processors with their enabled state for the frontend selector.
                 "assets_count": copied_assets,
             }
 
@@ -768,6 +886,7 @@ async def edit_json_action(payload: EditJsonPayload):
         return {
             "success": True,
             "data": editor.data,
+                    # Extract PDF content blocks using the selected processor and return canonical JSON.
             "canonical": editor.to_canonical_content_json(),
         }
     except (ValueError, IndexError) as exc:
@@ -778,6 +897,7 @@ async def edit_json_action(payload: EditJsonPayload):
 
 
 @app.post("/api/actions/upgrade-json")
+# Upgrade extracted JSON by correcting text and/or merging nearby figure blocks.
 async def upgrade_json_action(payload: UpgradePayload):
     mode = str(payload.mode or "both").strip().lower()
     if mode not in {"text", "figures", "both"}:
@@ -818,7 +938,76 @@ async def upgrade_json_action(payload: UpgradePayload):
         raise HTTPException(status_code=500, detail=f"Upgrade action failed: {exc}") from exc
 
 
+@app.post("/api/actions/text-finder")
+# Run keyword matching and return blocks annotated with text-finder highlights.
+async def text_finder_action(payload: TextFinderPayload):
+    if not payload.find_paragraphs and not payload.find_section_headers:
+        raise HTTPException(status_code=400, detail="Enable at least one target type: paragraphs or section headers.")
+
+    keyword_weights = _normalize_text_finder_keywords(dict(payload.keywords or {}))
+    if not keyword_weights:
+        raise HTTPException(status_code=400, detail="Keywords file is empty or invalid.")
+
+    try:
+        formatted = format_as_content_json(dict(payload.data))
+        blocks = _prepare_blocks_for_upgrade(json.loads(json.dumps(formatted.get("blocks", []))))
+        threshold = int(float(payload.word_count_threshold))
+
+        with tempfile.TemporaryDirectory(prefix="pdfwf_textfinder_in_") as input_tmp, tempfile.TemporaryDirectory(
+            prefix="pdfwf_textfinder_out_"
+        ) as output_tmp, tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as keywords_tmp:
+            try:
+                doc_folder = Path(input_tmp) / "document"
+                doc_folder.mkdir(parents=True, exist_ok=True)
+
+                doc_payload = dict(formatted)
+                doc_payload["blocks"] = blocks
+                _write_json_file(doc_folder / "document_content.json", doc_payload)
+
+                _write_json_file(Path(keywords_tmp.name), keyword_weights)
+                keywords_tmp.flush()
+
+                matched_texts = _extract_with_text_finder_cli(
+                    input_tmp=input_tmp,
+                    output_tmp=output_tmp,
+                    keywords_file=keywords_tmp.name,
+                    word_count_threshold=threshold,
+                    find_paragraphs=bool(payload.find_paragraphs),
+                    find_section_headers=bool(payload.find_section_headers),
+                    count_duplicates=bool(payload.count_duplicates),
+                )
+            finally:
+                try:
+                    os.unlink(keywords_tmp.name)
+                except Exception:
+                    pass
+
+        annotated_blocks, highlighted_count = _annotate_text_finder_blocks(blocks, matched_texts)
+
+        result = dict(formatted)
+        result["blocks"] = annotated_blocks
+        max_match_score = max((int(block.get("text_finder_match_score", 0)) for block in annotated_blocks), default=0)
+
+        return {
+            "summary": {
+                "blocks_before": len(blocks),
+                "blocks_after": highlighted_count,
+                "highlighted_count": highlighted_count,
+                "max_match_score": max_match_score,
+                "threshold": threshold,
+                "keywords_count": len(keyword_weights),
+            },
+            "data": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Text finder action failed: {exc}") from exc
+
+
 @app.get("/api/assets/{doc_id}/{asset_path:path}")
+# Serve a cached extracted asset file while blocking path traversal.
 async def get_extracted_asset(doc_id: str, asset_path: str):
     doc_folder = (ASSET_CACHE_ROOT / doc_id).resolve()
     if not doc_folder.exists() or not doc_folder.is_dir():
@@ -835,6 +1024,7 @@ async def get_extracted_asset(doc_id: str, asset_path: str):
 
 
 @app.get("/api/assets-manifest/{doc_id}")
+# Return the list of cached image assets for a given document id.
 async def get_assets_manifest(doc_id: str):
     return {
         "doc_id": doc_id,

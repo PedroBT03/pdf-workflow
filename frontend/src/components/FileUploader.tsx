@@ -4,9 +4,11 @@ interface UploadProps {
   onUploadSuccess: (data: any) => void;
 }
 
+// Render a file input that uploads a PDF and returns parsed backend output.
 export const FileUploader = ({ onUploadSuccess }: UploadProps) => {
   const [loading, setLoading] = useState(false);
 
+  // Upload the selected PDF to the backend and return parsed metadata.
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;

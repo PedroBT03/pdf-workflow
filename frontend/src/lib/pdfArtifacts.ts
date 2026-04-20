@@ -5,6 +5,7 @@ export const API_BASE = 'http://localhost:8000';
 
 export type Box4 = [number, number, number, number];
 
+// Build a backend asset URL for a cached document file.
 export const buildAssetUrl = (docId: string, assetPath: string) => {
   const encodedDocId = encodeURIComponent(docId);
   const encodedPath = assetPath
@@ -16,8 +17,10 @@ export const buildAssetUrl = (docId: string, assetPath: string) => {
   return `${API_BASE}/api/assets/${encodedDocId}/${encodedPath}`;
 };
 
+// Build the backend manifest URL for a document id.
 export const buildManifestUrl = (docId: string) => `${API_BASE}/api/assets-manifest/${encodeURIComponent(docId)}`;
 
+// Drop leading native *_images folder segments from exported asset paths.
 export const stripNativeImagesPrefix = (assetPath: string) => {
   const parts = assetPath.split('/').filter(Boolean);
   const idx = parts.findIndex((part) => part.toLowerCase().endsWith('_images'));
@@ -27,15 +30,18 @@ export const stripNativeImagesPrefix = (assetPath: string) => {
   return parts.length ? parts.slice(-1).join('/') : assetPath;
 };
 
+// Sanitize a path into safe filesystem segments for export.
 export const sanitizePathSegments = (pathValue: string) =>
   pathValue
     .split('/')
     .filter(Boolean)
     .map((segment) => segment.replace(/[^a-zA-Z0-9._-]/g, '_'));
 
+// Check whether a block should be rendered as a table grid.
 export const isTableWithGrid = (block: any) =>
   String(block?.type ?? '').toLowerCase() === 'table' && Array.isArray(block?.block);
 
+// Convert a value into a valid 4-number box tuple.
 export const toBox4 = (value: any): Box4 | null => {
   if (!Array.isArray(value) || value.length !== 4) return null;
   const nums = value.map((n) => Number(n));
@@ -43,6 +49,7 @@ export const toBox4 = (value: any): Box4 | null => {
   return [nums[0], nums[1], nums[2], nums[3]];
 };
 
+// Build a normalized row/column matrix of cell boxes for table overlays.
 export const getCellBoxesMatrix = (block: any, rowCount: number, colCount: number): Array<Array<Box4 | null>> => {
   const empty = Array.from({ length: rowCount }).map(() => Array.from({ length: colCount }).map(() => null as Box4 | null));
   const raw = block?.cell_boxes;
@@ -69,6 +76,7 @@ export const getCellBoxesMatrix = (block: any, rowCount: number, colCount: numbe
   return empty;
 };
 
+// Collect caption boxes from singular or plural caption box representations.
 export const getCaptionBoxes = (block: any): Box4[] => {
   const singular = toBox4(block?.caption_box);
   if (singular) {
@@ -90,6 +98,7 @@ export const getCaptionBoxes = (block: any): Box4[] => {
   return [];
 };
 
+// Compute row and column dimensions from a table data matrix.
 export const getTableDimensions = (tableRows: any[]) => {
   const rows = tableRows.length;
   const cols = tableRows.reduce((max, row) => {
@@ -102,6 +111,7 @@ export const getTableDimensions = (tableRows: any[]) => {
   };
 };
 
+// Convert arbitrary JSON into the canonical content JSON schema used by export.
 export const toCanonicalContentJson = (raw: any) => {
   const metadata = raw && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : {};
   const references = Array.isArray(raw?.references) ? raw.references : [];

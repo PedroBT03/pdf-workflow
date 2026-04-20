@@ -5,6 +5,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_upgrade_json_text_mode_corrects_unicode(client):
+    # Verifies text-mode upgrade normalizes Unicode ligatures in block content.
     payload = {
         "mode": "text",
         "data": {
@@ -31,6 +32,7 @@ def test_upgrade_json_text_mode_corrects_unicode(client):
 
 
 def test_upgrade_json_figures_mode_merges_adjacent_figures(client):
+    # Verifies figure-mode upgrade merges neighboring figure blocks on the same page.
     payload = {
         "mode": "figures",
         "data": {
