@@ -100,6 +100,7 @@ const App = () => {
   const [textFinderKeywordsFile, setTextFinderKeywordsFile] = useState<File | null>(null);
   const [textFinderKeywordsFileName, setTextFinderKeywordsFileName] = useState('No file selected');
   const [textFinderArtifact, setTextFinderArtifact] = useState<any | null>(null);
+  const [textFinderFoundArtifact, setTextFinderFoundArtifact] = useState<any | null>(null);
   const [textFinderArtifactLabel, setTextFinderArtifactLabel] = useState('No highlighted artifact yet');
   const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
   const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -217,6 +218,7 @@ const App = () => {
     setTextFinderKeywordsFile(null);
     setTextFinderKeywordsFileName('No file selected');
     setTextFinderArtifact(null);
+    setTextFinderFoundArtifact(null);
     setTextFinderArtifactLabel('No highlighted artifact yet');
     setWorkflowPath([]);
     setWorkflowMessage(null);
@@ -501,6 +503,7 @@ const App = () => {
       setEditedJson(null);
       setUpgradedJson(null);
       setTextFinderArtifact(null);
+      setTextFinderFoundArtifact(null);
       setTextFinderArtifactLabel('No highlighted artifact yet');
       return true;
     } catch (err: any) {
@@ -662,12 +665,33 @@ const App = () => {
       }
 
       const highlightedArtifact = payload?.data;
+      const foundArtifact = payload?.found_texts_artifact;
+      const fallbackFoundTexts = Array.isArray(payload?.found_texts) ? payload.found_texts : [];
+      const fallbackUniqueMatches = new Set(fallbackFoundTexts.map((entry: unknown) => String(entry || '').trim()).filter(Boolean)).size;
+      const safeFoundArtifact = foundArtifact && typeof foundArtifact === 'object'
+        ? foundArtifact
+        : {
+            matches: fallbackFoundTexts.map((content: unknown) => ({
+              content: String(content || '').trim(),
+              score: 1,
+            })),
+            total_matches: fallbackFoundTexts.length,
+            unique_matches: fallbackUniqueMatches,
+            settings: {
+              word_count_threshold: textFinderWordCountThreshold,
+              find_paragraphs: textFinderFindParagraphs,
+              find_section_headers: textFinderFindSectionHeaders,
+              count_duplicates: textFinderCountDuplicates,
+            },
+          };
       const beforeCount = Number(payload?.summary?.blocks_before ?? 0);
       const afterCount = Number(payload?.summary?.highlighted_count ?? payload?.summary?.blocks_after ?? 0);
 
       if (!highlightedArtifact || !Array.isArray(highlightedArtifact?.blocks)) {
         throw new Error('backend returned invalid text finder payload');
       }
+
+      setTextFinderFoundArtifact(safeFoundArtifact);
 
       if (afterCount === 0) {
         setWorkflowMessage({
@@ -1034,6 +1058,7 @@ const App = () => {
     const editedSnapshot = hasEditedJson && editedJson ? JSON.parse(JSON.stringify(editedJson)) : null;
     const upgradedSnapshot = upgradedJson ? JSON.parse(JSON.stringify(upgradedJson)) : null;
     const textFinderSnapshot = textFinderArtifact ? JSON.parse(JSON.stringify(textFinderArtifact)) : null;
+    const textFinderFoundSnapshot = textFinderFoundArtifact ? JSON.parse(JSON.stringify(textFinderFoundArtifact)) : null;
 
     try {
       const folderName = safeName || 'metadata';
@@ -1118,6 +1143,7 @@ const App = () => {
       rewriteAssetPaths(baseSnapshot);
       if (editedSnapshot) rewriteAssetPaths(editedSnapshot);
       if (upgradedSnapshot) rewriteAssetPaths(upgradedSnapshot);
+      if (textFinderSnapshot) rewriteAssetPaths(textFinderSnapshot);
 
       const filesToWrite: Array<{ name: string; data: any; canonical: any }> = [];
       const seenCanonical = new Set<string>();
@@ -1142,8 +1168,35 @@ const App = () => {
         pushIfUnique(`${folderName}_upgraded_content.json`, upgradedSnapshot);
       }
 
+      let additionalJsonCount = 0;
       if (textFinderSnapshot) {
-        pushIfUnique(`${folderName}_text_finder_content.json`, textFinderSnapshot);
+        const highlightedBlocks = Array.isArray(textFinderSnapshot.blocks)
+          ? textFinderSnapshot.blocks.filter((block: any) => Boolean(block?.text_finder_highlighted))
+          : [];
+        const totalMatchesRaw = Number(textFinderFoundSnapshot?.total_matches);
+        const totalMatches = Number.isFinite(totalMatchesRaw) ? totalMatchesRaw : highlightedBlocks.length;
+        const uniqueByContent = new Set(highlightedBlocks.map((block: any) => String(block?.content || '').trim()).filter(Boolean)).size;
+        const uniqueMatchesRaw = Number(textFinderFoundSnapshot?.unique_matches);
+        const uniqueMatches = Number.isFinite(uniqueMatchesRaw) ? uniqueMatchesRaw : uniqueByContent;
+
+        // Export a single combined Text Finder artifact with only matched blocks and found metadata.
+        const combinedTextFinderSnapshot = {
+          blocks: highlightedBlocks,
+          total_matches: totalMatches,
+          unique_matches: uniqueMatches,
+          settings: textFinderFoundSnapshot?.settings ?? {
+            word_count_threshold: textFinderWordCountThreshold,
+            find_paragraphs: textFinderFindParagraphs,
+            find_section_headers: textFinderFindSectionHeaders,
+            count_duplicates: textFinderCountDuplicates,
+          },
+        };
+
+        const fileHandle = await docFolder.getFileHandle(`${folderName}_text_finder_content.json`, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(new Blob([JSON.stringify(combinedTextFinderSnapshot, null, 2)], { type: 'application/json' }));
+        await writable.close();
+        additionalJsonCount = 1;
       }
 
       for (const item of filesToWrite) {
@@ -1154,11 +1207,11 @@ const App = () => {
       }
 
       if (manifestAssets.length === 0) {
-        showExportFeedback('success', `Saved ${filesToWrite.length} JSON file(s) to ${outputFolderName}/${folderName}/ (no image assets in this document).`);
+        showExportFeedback('success', `Saved ${filesToWrite.length + additionalJsonCount} JSON file(s) to ${outputFolderName}/${folderName}/ (no image assets in this document).`);
       } else if (failedImages === 0) {
-        showExportFeedback('success', `Saved ${filesToWrite.length} JSON file(s) and ${copiedImages} image asset(s) to ${outputFolderName}/${folderName}/.`);
+        showExportFeedback('success', `Saved ${filesToWrite.length + additionalJsonCount} JSON file(s) and ${copiedImages} image asset(s) to ${outputFolderName}/${folderName}/.`);
       } else {
-        showExportFeedback('info', `Saved ${filesToWrite.length} JSON file(s), copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
+        showExportFeedback('info', `Saved ${filesToWrite.length + additionalJsonCount} JSON file(s), copied ${copiedImages}/${manifestAssets.length} image(s). ${failedImages} asset(s) failed to copy.`);
       }
     } catch (err: any) {
       showExportFeedback('error', `Artifacts export failed: ${err.message || 'unknown error'}`, 4000);
@@ -1992,6 +2045,9 @@ const App = () => {
           </div>
           <div className={`px-3 py-2 rounded-xl border ${hasUpgradedArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
             Upgraded: {hasUpgradedArtifact ? 'available' : 'missing'}
+          </div>
+          <div className={`px-3 py-2 rounded-xl border ${hasTextFinderArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            Text Finder: {hasTextFinderArtifact ? 'available' : 'missing'}
           </div>
         </div>
       </div>

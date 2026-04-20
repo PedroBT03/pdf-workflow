@@ -983,6 +983,8 @@ async def text_finder_action(payload: TextFinderPayload):
                     pass
 
         annotated_blocks, highlighted_count = _annotate_text_finder_blocks(blocks, matched_texts)
+        normalized_matches = [str(text).strip().replace("\n", " ") for text in matched_texts if str(text).strip()]
+        match_counts = Counter(normalized_matches)
 
         result = dict(formatted)
         result["blocks"] = annotated_blocks
@@ -996,6 +998,24 @@ async def text_finder_action(payload: TextFinderPayload):
                 "max_match_score": max_match_score,
                 "threshold": threshold,
                 "keywords_count": len(keyword_weights),
+            },
+            "found_texts": normalized_matches,
+            "found_texts_artifact": {
+                "matches": [
+                    {
+                        "content": text,
+                        "score": int(match_counts.get(text, 0)),
+                    }
+                    for text in normalized_matches
+                ],
+                "total_matches": len(normalized_matches),
+                "unique_matches": len(match_counts),
+                "settings": {
+                    "word_count_threshold": threshold,
+                    "find_paragraphs": bool(payload.find_paragraphs),
+                    "find_section_headers": bool(payload.find_section_headers),
+                    "count_duplicates": bool(payload.count_duplicates),
+                },
             },
             "data": result,
         }

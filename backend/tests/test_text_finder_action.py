@@ -34,6 +34,12 @@ def test_text_finder_filters_only_matching_blocks(client):
     assert body["summary"]["blocks_before"] == 3
     assert body["summary"]["blocks_after"] == 1
     assert len(body["data"]["blocks"]) == 3
+    assert body["found_texts_artifact"]["total_matches"] >= 1
+    assert body["found_texts_artifact"]["unique_matches"] >= 1
+    assert isinstance(body["found_texts"], list)
+    assert isinstance(body["found_texts_artifact"]["matches"], list)
+    assert all(isinstance(item, dict) for item in body["found_texts_artifact"]["matches"])
+    assert all("content" in item and "score" in item for item in body["found_texts_artifact"]["matches"])
     highlighted = [block for block in body["data"]["blocks"] if block.get("text_finder_highlighted")]
     assert len(highlighted) == 1
     assert "FIDO2" in highlighted[0]["content"]
@@ -66,5 +72,9 @@ def test_text_finder_returns_empty_block_list_when_no_match(client):
     assert body["summary"]["blocks_before"] == 1
     assert body["summary"]["blocks_after"] == 0
     assert len(body["data"]["blocks"]) == 1
+    assert body["found_texts_artifact"]["total_matches"] == 0
+    assert body["found_texts_artifact"]["unique_matches"] == 0
+    assert body["found_texts_artifact"]["matches"] == []
+    assert body["found_texts"] == []
     assert body["data"]["blocks"][0]["text_finder_highlighted"] is False
     assert body["data"]["blocks"][0]["text_finder_match_score"] == 0
