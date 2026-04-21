@@ -900,6 +900,29 @@ def _annotate_text_finder_blocks(blocks: list[dict[str, Any]], matched_texts: li
 
     return annotated, highlighted_count
 
+# TODO: DEV
+@app.get("/api/dev/load-test-json")
+async def load_test_json():
+    # Caminho para o ficheiro na raiz do projeto
+    file_path = Path("../test_content.json")
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Ficheiro test_content.json não encontrado na raiz.")
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        # Garante que campos essenciais existem para o frontend não crashar
+        if "id" not in data:
+            data["id"] = "dev-static-id"
+        if "blocks" not in data:
+            data["blocks"] = []
+            
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao ler JSON: {str(e)}")
+# TODO: DEV
 
 @app.get("/api/processors")
 # Return available processors with their enabled state for the frontend selector.

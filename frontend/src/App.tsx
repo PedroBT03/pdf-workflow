@@ -560,6 +560,40 @@ const App = () => {
     }
   };
 
+  // TODO: DEV
+  const loadDevJson = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/dev/load-test-json`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Falha ao carregar JSON de teste');
+      }
+      const data = await response.json();
+
+      // Atualiza o estado exatamente como a extração normal faria
+      setDocData(data);
+      workflowJsonRef.current = data;
+      setJsonDraft(JSON.stringify(data, null, 2));
+      
+      // Atualiza metadados da UI
+      if (Array.isArray(data.page_sizes)) {
+        setNumPages(data.page_sizes.length);
+      }
+      
+      setWorkflowMessage({ type: 'success', message: 'JSON de teste carregado com sucesso!' });
+      appendWorkflowPath('extract_json_from_pdf', 'done', 'Loaded from test_content.json');
+      setActiveSidebarTab('artifacts');
+      
+    } catch (err: any) {
+      console.error(err);
+      setWorkflowMessage({ type: 'error', message: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+  // TODO: DEV
+
   // Start the interactive JSON editing action for selected blocks.
   const runEditJsonAction = (skipJsonAvailabilityCheck = false) => {
     if (isActionInProgress) {
@@ -1930,6 +1964,18 @@ const App = () => {
               ? 'Generate highlighted artifact'
               : 'Run action'}
           </button>
+          
+          {/* TODO: DEV */}
+          {selectedAction === 'extract_json_from_pdf' && (
+            <button
+              onClick={loadDevJson}
+              disabled={loading || isBatchRunning}
+              className="w-full mt-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-500 border border-amber-600/50 py-2 rounded-xl font-mono text-xs transition-all"
+            >
+              DEV: Load test_content.json
+            </button>
+          )}
+          {/* END DEV */}
 
           <button
             onClick={addSelectedActionToWorkflow}
