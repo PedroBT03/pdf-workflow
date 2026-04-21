@@ -1,6 +1,6 @@
 // Workflow types and labels used by the action-based UI and execution path.
 
-export type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json' | 'text_finder';
+export type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json' | 'text_finder' | 'block_finder';
 export type UpgradeMode = 'text' | 'figures' | 'both';
 
 export type WorkflowPathItem = {
@@ -17,6 +17,7 @@ export const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
   edit_json: 'Edit JSON',
   upgrade_json: 'Upgrade JSON',
   text_finder: 'Text Finder',
+  block_finder: 'Block Finder',
 };
 
 export const UPGRADE_MODE_LABELS: Record<UpgradeMode, string> = {

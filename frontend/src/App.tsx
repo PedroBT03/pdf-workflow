@@ -54,7 +54,7 @@ const PDF2DATA_TABLE_OPTIONS = [
 ];
 
 const RIGHT_RAIL_WIDTH_PX = 380;
-const WORKFLOW_EXECUTION_ORDER: WorkflowActionId[] = ['extract_json_from_pdf', 'edit_json', 'upgrade_json', 'text_finder'];
+const WORKFLOW_EXECUTION_ORDER: WorkflowActionId[] = ['extract_json_from_pdf', 'edit_json', 'upgrade_json', 'text_finder', 'block_finder'];
 const WORD_COUNT_THRESHOLD_HINT =
   'Minimum words per block for keyword matching. Increase it to ignore short headings or labels.';
 
@@ -73,6 +73,8 @@ type WorkflowQueueItem = {
   textFinderFindParagraphs: boolean;
   textFinderFindSectionHeaders: boolean;
   textFinderCountDuplicates: boolean;
+  blockFinderFindTables: boolean;
+  blockFinderFindFigures: boolean;
   selected: boolean;
 };
 
@@ -102,6 +104,13 @@ const App = () => {
   const [textFinderArtifact, setTextFinderArtifact] = useState<any | null>(null);
   const [textFinderFoundArtifact, setTextFinderFoundArtifact] = useState<any | null>(null);
   const [textFinderArtifactLabel, setTextFinderArtifactLabel] = useState('No highlighted artifact yet');
+  const [blockFinderFindTables, setBlockFinderFindTables] = useState(true);
+  const [blockFinderFindFigures, setBlockFinderFindFigures] = useState(false);
+  const [blockFinderKeywordsFile, setBlockFinderKeywordsFile] = useState<File | null>(null);
+  const [blockFinderKeywordsFileName, setBlockFinderKeywordsFileName] = useState('No file selected');
+  const [blockFinderArtifact, setBlockFinderArtifact] = useState<any | null>(null);
+  const [blockFinderFoundArtifact, setBlockFinderFoundArtifact] = useState<any | null>(null);
+  const [blockFinderArtifactLabel, setBlockFinderArtifactLabel] = useState('No highlighted artifact yet');
   const [workflowPath, setWorkflowPath] = useState<WorkflowPathItem[]>([]);
   const [workflowMessage, setWorkflowMessage] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<'workflow' | 'artifacts' | 'editor'>('workflow');
@@ -220,6 +229,13 @@ const App = () => {
     setTextFinderArtifact(null);
     setTextFinderFoundArtifact(null);
     setTextFinderArtifactLabel('No highlighted artifact yet');
+    setBlockFinderFindTables(true);
+    setBlockFinderFindFigures(false);
+    setBlockFinderKeywordsFile(null);
+    setBlockFinderKeywordsFileName('No file selected');
+    setBlockFinderArtifact(null);
+    setBlockFinderFoundArtifact(null);
+    setBlockFinderArtifactLabel('No highlighted artifact yet');
     setWorkflowPath([]);
     setWorkflowMessage(null);
     setActiveWorkflowView('executed');
@@ -274,6 +290,7 @@ const App = () => {
   );
   const hasUpgradedArtifact = Boolean(upgradedJson);
   const hasTextFinderArtifact = Boolean(textFinderArtifact && Array.isArray(textFinderArtifact.blocks));
+  const hasBlockFinderArtifact = Boolean(blockFinderArtifact && Array.isArray(blockFinderArtifact.blocks));
   const isActionInProgress = actionInProgress !== null;
   const showJsonOverlays = hasJsonArtifact;
 
@@ -294,6 +311,9 @@ const App = () => {
     if (action === 'upgrade_json') return hasJsonArtifact;
     if (action === 'text_finder') {
       return hasJsonArtifact && Boolean(textFinderKeywordsFile);
+    }
+    if (action === 'block_finder') {
+      return hasJsonArtifact && Boolean(blockFinderKeywordsFile);
     }
     return false;
   };
@@ -319,6 +339,19 @@ const App = () => {
       throw new Error('Keywords file has no valid keyword weights.');
     }
     return normalized;
+  };
+
+  // Parse a block finder keywords TXT file and normalize non-empty keyword lines.
+  const parseBlockFinderKeywordsFile = async (file: File): Promise<string> => {
+    const raw = await file.text();
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!lines.length) {
+      throw new Error('Keywords TXT file has no valid keyword lines.');
+    }
+    return `${lines.join('\n')}\n`;
   };
 
   // Append a timestamped execution step to the workflow timeline.
@@ -387,7 +420,6 @@ const App = () => {
       cancelled = true;
     };
   }, []);
-
   useEffect(() => {
     if (!selectedTarget || !Array.isArray(parsedData?.blocks)) {
       setSelectedContent('');
@@ -445,6 +477,12 @@ const App = () => {
     setUpgradedJson(null);
     setTextFinderKeywordsFile(null);
     setTextFinderKeywordsFileName('No file selected');
+    setBlockFinderKeywordsFile(null);
+    setBlockFinderKeywordsFileName('No file selected');
+    setTextFinderArtifact(null);
+    setTextFinderFoundArtifact(null);
+    setBlockFinderArtifact(null);
+    setBlockFinderFoundArtifact(null);
     setActiveSidebarTab('workflow');
     setWorkflowPath([]);
     e.target.value = '';
@@ -505,6 +543,9 @@ const App = () => {
       setTextFinderArtifact(null);
       setTextFinderFoundArtifact(null);
       setTextFinderArtifactLabel('No highlighted artifact yet');
+      setBlockFinderArtifact(null);
+      setBlockFinderFoundArtifact(null);
+      setBlockFinderArtifactLabel('No highlighted artifact yet');
       return true;
     } catch (err: any) {
       console.error(err);
@@ -727,6 +768,109 @@ const App = () => {
     }
   };
 
+  // Execute block finder matching over table/figure blocks and update overlays.
+  const runBlockFinderAction = async () => {
+    if (isActionInProgress) {
+      setWorkflowMessage({ type: 'info', message: `Finish ${WORKFLOW_ACTION_LABELS[actionInProgress!]} before starting another action.` });
+      return false;
+    }
+
+    setActionInProgress('block_finder');
+    setLoading(true);
+    try {
+      const workflowArtifact = getWorkflowJsonArtifact();
+      if (!workflowArtifact) {
+        const message = 'Run Extract JSON first.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('block_finder', 'failed', message);
+        return false;
+      }
+
+      if (!blockFinderKeywordsFile) {
+        const message = 'Upload a keywords TXT file before generating a highlighted artifact.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('block_finder', 'failed', message);
+        return false;
+      }
+
+      if (!blockFinderFindTables && !blockFinderFindFigures) {
+        const message = 'Enable table and/or figure matching.';
+        setWorkflowMessage({ type: 'error', message });
+        appendWorkflowPath('block_finder', 'failed', message);
+        return false;
+      }
+
+      const keywords = await parseBlockFinderKeywordsFile(blockFinderKeywordsFile);
+
+      const response = await fetch(`${API_BASE}/api/actions/block-finder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: workflowArtifact,
+          keywords,
+          find_tables: blockFinderFindTables,
+          find_figures: blockFinderFindFigures,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.detail || `block finder request failed (${response.status})`);
+      }
+
+      const highlightedArtifact = payload?.data;
+      const foundArtifact = payload?.found_blocks_artifact;
+      const beforeCount = Number(payload?.summary?.blocks_before ?? 0);
+      const afterCount = Number(payload?.summary?.highlighted_count ?? payload?.summary?.blocks_after ?? 0);
+
+      if (!highlightedArtifact || !Array.isArray(highlightedArtifact?.blocks)) {
+        throw new Error('backend returned invalid block finder payload');
+      }
+
+      setBlockFinderFoundArtifact(foundArtifact && typeof foundArtifact === 'object' ? foundArtifact : {
+        blocks: [],
+        total_matches: 0,
+        unique_matches: 0,
+        settings: {
+          find_tables: blockFinderFindTables,
+          find_figures: blockFinderFindFigures,
+        },
+      });
+
+      if (afterCount === 0) {
+        setWorkflowMessage({
+          type: 'info',
+          message: `Block Finder found no matches. Kept current overlays (${beforeCount} blocks).`,
+        });
+        appendWorkflowPath('block_finder', 'done', `0 matches | kept ${beforeCount} blocks`);
+        return true;
+      }
+
+      setBlockFinderArtifact(highlightedArtifact);
+      setBlockFinderArtifactLabel(`Highlighted artifact generated from ${blockFinderKeywordsFile.name}`);
+      workflowJsonRef.current = highlightedArtifact;
+      setJsonDraft(JSON.stringify(highlightedArtifact, null, 2));
+      setSelectedTarget(null);
+      setSelectedContent('');
+      setActiveSidebarTab('artifacts');
+      setWorkflowMessage({
+        type: 'success',
+        message: `Block Finder completed. Highlighted: ${afterCount} block(s) out of ${beforeCount}.`,
+      });
+      appendWorkflowPath('block_finder', 'done', `highlighted ${afterCount}/${beforeCount}`);
+      return true;
+    } catch (err: any) {
+      console.error(err);
+      const message = `Action failed: ${err.message || 'unknown error'}`;
+      setWorkflowMessage({ type: 'error', message });
+      appendWorkflowPath('block_finder', 'failed', message);
+      return false;
+    } finally {
+      setLoading(false);
+      setActionInProgress(null);
+    }
+  };
+
   // Continue running queued workflow actions sequentially, pausing for manual edit steps.
   const continueBatchWorkflow = async (queueOverride?: WorkflowQueueItem[]) => {
     let queue = queueOverride ?? workflowQueue;
@@ -755,6 +899,8 @@ const App = () => {
       setTextFinderFindParagraphs(nextItem.textFinderFindParagraphs);
       setTextFinderFindSectionHeaders(nextItem.textFinderFindSectionHeaders);
       setTextFinderCountDuplicates(nextItem.textFinderCountDuplicates);
+      setBlockFinderFindTables(nextItem.blockFinderFindTables);
+      setBlockFinderFindFigures(nextItem.blockFinderFindFigures);
       setSelectedAction(nextAction);
 
       if (nextAction === 'edit_json') {
@@ -789,6 +935,8 @@ const App = () => {
         ok = await runUpgradeJsonAction();
       } else if (nextAction === 'text_finder') {
         ok = await runTextFinderAction();
+      } else if (nextAction === 'block_finder') {
+        ok = await runBlockFinderAction();
       }
       if (!ok) {
         setIsBatchRunning(false);
@@ -866,6 +1014,8 @@ const App = () => {
         textFinderFindParagraphs,
         textFinderFindSectionHeaders,
         textFinderCountDuplicates,
+        blockFinderFindTables,
+        blockFinderFindFigures,
         selected: true,
       };
       setActiveWorkflowView('queue');
@@ -921,7 +1071,11 @@ const App = () => {
       await runUpgradeJsonAction();
       return;
     }
-    await runTextFinderAction();
+    if (selectedAction === 'text_finder') {
+      await runTextFinderAction();
+      return;
+    }
+    await runBlockFinderAction();
   };
 
   // Update pagination state after the PDF document finishes loading.
@@ -1059,6 +1213,8 @@ const App = () => {
     const upgradedSnapshot = upgradedJson ? JSON.parse(JSON.stringify(upgradedJson)) : null;
     const textFinderSnapshot = textFinderArtifact ? JSON.parse(JSON.stringify(textFinderArtifact)) : null;
     const textFinderFoundSnapshot = textFinderFoundArtifact ? JSON.parse(JSON.stringify(textFinderFoundArtifact)) : null;
+    const blockFinderSnapshot = blockFinderArtifact ? JSON.parse(JSON.stringify(blockFinderArtifact)) : null;
+    const blockFinderFoundSnapshot = blockFinderFoundArtifact ? JSON.parse(JSON.stringify(blockFinderFoundArtifact)) : null;
 
     try {
       const folderName = safeName || 'metadata';
@@ -1144,6 +1300,7 @@ const App = () => {
       if (editedSnapshot) rewriteAssetPaths(editedSnapshot);
       if (upgradedSnapshot) rewriteAssetPaths(upgradedSnapshot);
       if (textFinderSnapshot) rewriteAssetPaths(textFinderSnapshot);
+      if (blockFinderSnapshot) rewriteAssetPaths(blockFinderSnapshot);
 
       const filesToWrite: Array<{ name: string; data: any; canonical: any }> = [];
       const seenCanonical = new Set<string>();
@@ -1196,7 +1353,34 @@ const App = () => {
         const writable = await fileHandle.createWritable();
         await writable.write(new Blob([JSON.stringify(combinedTextFinderSnapshot, null, 2)], { type: 'application/json' }));
         await writable.close();
-        additionalJsonCount = 1;
+        additionalJsonCount += 1;
+      }
+
+      if (blockFinderSnapshot) {
+        const highlightedBlocks = Array.isArray(blockFinderSnapshot.blocks)
+          ? blockFinderSnapshot.blocks.filter((block: any) => Boolean(block?.block_finder_highlighted))
+          : [];
+        const totalMatchesRaw = Number(blockFinderFoundSnapshot?.total_matches);
+        const totalMatches = Number.isFinite(totalMatchesRaw) ? totalMatchesRaw : highlightedBlocks.length;
+        const uniqueMatchesRaw = Number(blockFinderFoundSnapshot?.unique_matches);
+        const uniqueMatches = Number.isFinite(uniqueMatchesRaw) ? uniqueMatchesRaw : highlightedBlocks.length;
+
+        // Export a single combined Block Finder artifact with only matched blocks and found metadata.
+        const combinedBlockFinderSnapshot = {
+          blocks: highlightedBlocks,
+          total_matches: totalMatches,
+          unique_matches: uniqueMatches,
+          settings: blockFinderFoundSnapshot?.settings ?? {
+            find_tables: blockFinderFindTables,
+            find_figures: blockFinderFindFigures,
+          },
+        };
+
+        const fileHandle = await docFolder.getFileHandle(`${folderName}_block_finder_content.json`, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(new Blob([JSON.stringify(combinedBlockFinderSnapshot, null, 2)], { type: 'application/json' }));
+        await writable.close();
+        additionalJsonCount += 1;
       }
 
       for (const item of filesToWrite) {
@@ -1313,6 +1497,24 @@ const App = () => {
     e.target.value = '';
   };
 
+  // Load a keywords file for block-finder matching and show status feedback.
+  const handleBlockFinderKeywordsFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    if (file && !file.name.toLowerCase().endsWith('.txt')) {
+      setBlockFinderKeywordsFile(null);
+      setBlockFinderKeywordsFileName('No file selected');
+      setWorkflowMessage({ type: 'error', message: 'Block Finder keywords must be a .txt file.' });
+      e.target.value = '';
+      return;
+    }
+    setBlockFinderKeywordsFile(file);
+    setBlockFinderKeywordsFileName(file?.name || 'No file selected');
+    if (file) {
+      setWorkflowMessage({ type: 'info', message: `Loaded block finder keywords file: ${file.name}` });
+    }
+    e.target.value = '';
+  };
+
   // Build hover title text for highlighted text-finder overlays.
   const buildTextFinderTitle = (block: any) => {
     if (!block?.text_finder_highlighted) return '';
@@ -1321,6 +1523,24 @@ const App = () => {
       return `Text Finder score: ${score}`;
     }
     return 'Text Finder match';
+  };
+
+  // Build hover title text for highlighted block-finder overlays.
+  const buildBlockFinderTitle = (block: any) => {
+    if (!block?.block_finder_highlighted) return '';
+    const score = Number(block?.block_finder_match_score ?? 0);
+    if (Number.isFinite(score) && score > 0) {
+      return `Block Finder score: ${score}`;
+    }
+    return 'Block Finder match';
+  };
+
+  // Build hover title text when one or more finder highlights are present on a block.
+  const buildFinderOverlayTitle = (block: any) => {
+    const textTitle = buildTextFinderTitle(block);
+    const blockTitle = buildBlockFinderTitle(block);
+    if (textTitle && blockTitle) return `${textTitle} | ${blockTitle}`;
+    return textTitle || blockTitle || '';
   };
 
   // Render the right-rail workflow history and queue controls.
@@ -1529,17 +1749,20 @@ const App = () => {
               <option value="edit_json">Edit JSON</option>
               <option value="upgrade_json">Upgrade JSON</option>
               <option value="text_finder">Text Finder</option>
+              <option value="block_finder">Block Finder</option>
             </select>
           </div>
 
-          {(selectedAction === 'extract_json_from_pdf' || selectedAction === 'upgrade_json' || selectedAction === 'text_finder') && (
+          {(selectedAction === 'extract_json_from_pdf' || selectedAction === 'upgrade_json' || selectedAction === 'text_finder' || selectedAction === 'block_finder') && (
             <div>
               <label className="block text-xs text-zinc-400 mb-2">
                 {selectedAction === 'extract_json_from_pdf'
                   ? 'Processor / model'
                   : selectedAction === 'upgrade_json'
                   ? 'Upgrade mode'
-                  : 'Text finder settings'}
+                  : selectedAction === 'text_finder'
+                  ? 'Text finder settings'
+                  : 'Block finder settings'}
               </label>
               {selectedAction === 'extract_json_from_pdf' ? (
                 <>
@@ -1591,66 +1814,102 @@ const App = () => {
                 </>
               ) : (
                 <div className="grid gap-3 min-w-0">
-                  <div className="min-w-0">
-                    <label className="block text-xs text-zinc-400 mb-2">Keywords JSON file</label>
-                    <label className="flex items-center justify-center gap-2 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 cursor-pointer hover:bg-zinc-700 transition-colors overflow-hidden box-border">
-                      <FolderOpen className="h-4 w-4 shrink-0" />
-                      <span className="min-w-0 truncate">Keywords file</span>
-                      <input type="file" accept=".json,application/json" className="hidden" onChange={handleTextFinderKeywordsFile} />
-                    </label>
-                    <div className="mt-2 text-[11px] text-zinc-500 break-all leading-snug">{textFinderKeywordsFileName}</div>
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <label className="block text-xs text-zinc-400">Word count threshold</label>
-                      <span className="relative inline-flex group">
-                        <Info className="h-4 w-4 text-zinc-500 cursor-help" aria-label={WORD_COUNT_THRESHOLD_HINT} />
-                        <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-64 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2 text-[11px] leading-snug text-zinc-200 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
-                          {WORD_COUNT_THRESHOLD_HINT}
-                        </span>
-                      </span>
-                    </div>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={textFinderWordCountThreshold}
-                      onChange={(e) => setTextFinderWordCountThreshold(Number(e.target.value || 0))}
-                      disabled={isActionInProgress}
-                      style={{ colorScheme: 'dark' }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
-                    />
-                  </div>
-                  <label className="flex items-center gap-2 text-xs text-zinc-300">
-                    <input
-                      type="checkbox"
-                      checked={textFinderFindParagraphs}
-                      onChange={(e) => setTextFinderFindParagraphs(e.target.checked)}
-                      disabled={isActionInProgress}
-                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
-                    />
-                    Find paragraph blocks
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-zinc-300">
-                    <input
-                      type="checkbox"
-                      checked={textFinderFindSectionHeaders}
-                      onChange={(e) => setTextFinderFindSectionHeaders(e.target.checked)}
-                      disabled={isActionInProgress}
-                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
-                    />
-                    Find section headers
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-zinc-300">
-                    <input
-                      type="checkbox"
-                      checked={textFinderCountDuplicates}
-                      onChange={(e) => setTextFinderCountDuplicates(e.target.checked)}
-                      disabled={isActionInProgress}
-                      className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
-                    />
-                    Count duplicate keyword occurrences
-                  </label>
+                  {selectedAction === 'text_finder' ? (
+                    <>
+                      <div className="min-w-0">
+                        <label className="block text-xs text-zinc-400 mb-2">Keywords JSON file</label>
+                        <label className="flex items-center justify-center gap-2 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 cursor-pointer hover:bg-zinc-700 transition-colors overflow-hidden box-border">
+                          <FolderOpen className="h-4 w-4 shrink-0" />
+                          <span className="min-w-0 truncate">Keywords file</span>
+                          <input type="file" accept=".json,application/json" className="hidden" onChange={handleTextFinderKeywordsFile} />
+                        </label>
+                        <div className="mt-2 text-[11px] text-zinc-500 break-all leading-snug">{textFinderKeywordsFileName}</div>
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <label className="block text-xs text-zinc-400">Word count threshold</label>
+                          <span className="relative inline-flex group">
+                            <Info className="h-4 w-4 text-zinc-500 cursor-help" aria-label={WORD_COUNT_THRESHOLD_HINT} />
+                            <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-64 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2 text-[11px] leading-snug text-zinc-200 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+                              {WORD_COUNT_THRESHOLD_HINT}
+                            </span>
+                          </span>
+                        </div>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          value={textFinderWordCountThreshold}
+                          onChange={(e) => setTextFinderWordCountThreshold(Number(e.target.value || 0))}
+                          disabled={isActionInProgress}
+                          style={{ colorScheme: 'dark' }}
+                          className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={textFinderFindParagraphs}
+                          onChange={(e) => setTextFinderFindParagraphs(e.target.checked)}
+                          disabled={isActionInProgress}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                        />
+                        Find paragraph blocks
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={textFinderFindSectionHeaders}
+                          onChange={(e) => setTextFinderFindSectionHeaders(e.target.checked)}
+                          disabled={isActionInProgress}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                        />
+                        Find section headers
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={textFinderCountDuplicates}
+                          onChange={(e) => setTextFinderCountDuplicates(e.target.checked)}
+                          disabled={isActionInProgress}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                        />
+                        Count duplicate keyword occurrences
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <div className="min-w-0">
+                        <label className="block text-xs text-zinc-400 mb-2">Keywords TXT file</label>
+                        <label className="flex items-center justify-center gap-2 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 cursor-pointer hover:bg-zinc-700 transition-colors overflow-hidden box-border">
+                          <FolderOpen className="h-4 w-4 shrink-0" />
+                          <span className="min-w-0 truncate">Keywords file</span>
+                          <input type="file" accept=".txt,text/plain" className="hidden" onChange={handleBlockFinderKeywordsFile} />
+                        </label>
+                        <div className="mt-2 text-[11px] text-zinc-500 break-all leading-snug">{blockFinderKeywordsFileName}</div>
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={blockFinderFindTables}
+                          onChange={(e) => setBlockFinderFindTables(e.target.checked)}
+                          disabled={isActionInProgress}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                        />
+                        Find table blocks
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-zinc-300">
+                        <input
+                          type="checkbox"
+                          checked={blockFinderFindFigures}
+                          onChange={(e) => setBlockFinderFindFigures(e.target.checked)}
+                          disabled={isActionInProgress}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                        />
+                        Find figure blocks
+                      </label>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -1666,6 +1925,8 @@ const App = () => {
               : loading
               ? 'Running action...'
               : selectedAction === 'text_finder'
+              ? 'Generate highlighted artifact'
+              : selectedAction === 'block_finder'
               ? 'Generate highlighted artifact'
               : 'Run action'}
           </button>
@@ -1837,6 +2098,14 @@ const App = () => {
                       const height = (y2 - y1) * pageSizes[currentPage].scale;
                       const isSelectedBlock = selectedTarget?.kind === 'block' && selectedTarget.blockIndex === index;
                       const isTextFinderHighlighted = Boolean(block?.text_finder_highlighted);
+                      const isBlockFinderHighlighted = Boolean(block?.block_finder_highlighted);
+                      const highlightMode = isTextFinderHighlighted && isBlockFinderHighlighted
+                        ? 'both'
+                        : isTextFinderHighlighted
+                        ? 'text'
+                        : isBlockFinderHighlighted
+                        ? 'block'
+                        : 'none';
 
                       if (isTableWithGrid(block)) {
                         const tableRows = Array.isArray(block.block) ? block.block : [];
@@ -1883,17 +2152,21 @@ const App = () => {
                                     className={`absolute overflow-hidden transition-colors ${
                                       editSessionEnabled
                                         ? 'pointer-events-auto cursor-pointer'
-                                        : isTextFinderHighlighted
+                                        : highlightMode !== 'none'
                                         ? 'pointer-events-auto cursor-help opacity-60'
                                         : 'pointer-events-none cursor-default opacity-60'
                                     } ${
                                       cellSelected
                                         ? 'border-2 border-amber-300 bg-amber-300/20'
-                                        : isTextFinderHighlighted
+                                        : highlightMode === 'both'
+                                        ? 'border border-rose-300/90 bg-rose-300/22 hover:bg-rose-300/32'
+                                        : highlightMode === 'text'
                                         ? 'border border-orange-300/90 bg-orange-300/22 hover:bg-orange-300/32'
+                                        : highlightMode === 'block'
+                                        ? 'border border-violet-500/95 bg-violet-500/35 hover:bg-violet-500/48'
                                         : 'border border-blue-400/80 bg-blue-400/10'
                                     }`}
-                                                                        title={buildTextFinderTitle(block)}
+                                    title={buildFinderOverlayTitle(block)}
                                     style={{
                                       left: cx1 * pageSizes[currentPage].scale,
                                       top: cy1 * pageSizes[currentPage].scale,
@@ -1920,17 +2193,21 @@ const App = () => {
                                   className={`absolute overflow-hidden transition-colors ${
                                     editSessionEnabled
                                       ? 'pointer-events-auto cursor-pointer'
-                                      : isTextFinderHighlighted
+                                      : highlightMode !== 'none'
                                       ? 'pointer-events-auto cursor-help opacity-60'
                                       : 'pointer-events-none cursor-default opacity-60'
                                   } ${
                                     selectedTarget?.kind === 'tableCaption' && selectedTarget.blockIndex === index && selectedTarget.captionIndex === captionIdx
                                       ? 'border-2 border-amber-300 bg-amber-300/20'
-                                      : isTextFinderHighlighted
+                                      : highlightMode === 'both'
+                                      ? 'border border-rose-300/90 bg-rose-300/22 hover:bg-rose-300/32'
+                                      : highlightMode === 'text'
                                       ? 'border border-orange-300/90 bg-orange-300/22 hover:bg-orange-300/32'
+                                      : highlightMode === 'block'
+                                      ? 'border border-violet-500/95 bg-violet-500/35 hover:bg-violet-500/48'
                                       : 'border border-blue-400/80 bg-blue-400/10'
                                   }`}
-                                                                    title={buildTextFinderTitle(block)}
+                                  title={buildFinderOverlayTitle(block)}
                                   style={{
                                     left: cx1 * pageSizes[currentPage].scale,
                                     top: cy1 * pageSizes[currentPage].scale,
@@ -1957,18 +2234,22 @@ const App = () => {
                           className={`absolute overflow-hidden transition-colors ${
                             editSessionEnabled
                               ? 'pointer-events-auto cursor-pointer'
-                              : isTextFinderHighlighted
+                              : highlightMode !== 'none'
                               ? 'pointer-events-auto cursor-help opacity-60'
                               : 'pointer-events-none cursor-default opacity-60'
                           } ${
                             isSelectedBlock
                               ? 'border-2 border-amber-300 bg-amber-300/20'
-                              : isTextFinderHighlighted
+                              : highlightMode === 'both'
+                              ? 'border-2 border-rose-300 bg-rose-300/20 hover:bg-rose-300/30'
+                              : highlightMode === 'text'
                               ? 'border-2 border-orange-300 bg-orange-300/20 hover:bg-orange-300/30'
+                              : highlightMode === 'block'
+                              ? 'border-2 border-violet-500 bg-violet-500/34 hover:bg-violet-500/48'
                               : 'border border-blue-400/80 bg-blue-400/10'
                           }`}
                           style={{ left, top, width, height }}
-                          title={buildTextFinderTitle(block)}
+                          title={buildFinderOverlayTitle(block)}
                           onClick={() => {
                             if (!editSessionEnabled) {
                               setWorkflowMessage({ type: 'info', message: 'Run "Edit JSON" to enable editing.' });
@@ -2048,6 +2329,9 @@ const App = () => {
           </div>
           <div className={`px-3 py-2 rounded-xl border ${hasTextFinderArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
             Text Finder: {hasTextFinderArtifact ? 'available' : 'missing'}
+          </div>
+          <div className={`px-3 py-2 rounded-xl border ${hasBlockFinderArtifact ? 'text-emerald-200 bg-emerald-950/30 border-emerald-900' : 'text-zinc-400 bg-zinc-800/40 border-zinc-700'}`}>
+            Block Finder: {hasBlockFinderArtifact ? 'available' : 'missing'}
           </div>
         </div>
       </div>

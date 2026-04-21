@@ -7,6 +7,7 @@ import importlib.util
 import os
 import sys
 import subprocess
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,13 @@ class TextFinderPayload(BaseModel):
     find_paragraphs: bool = True
     find_section_headers: bool = True
     count_duplicates: bool = False
+
+
+class BlockFinderPayload(BaseModel):
+    data: dict
+    keywords: str
+    find_tables: bool = True
+    find_figures: bool = False
 
 
 class EditTarget(BaseModel):
@@ -715,6 +723,156 @@ def _extract_with_text_finder_cli(
         return [line.rstrip("\n") for line in f if line.strip()]
 
 
+def _normalize_block_finder_keywords(raw_keywords: str) -> list[str]:
+    return [line.strip() for line in str(raw_keywords or "").splitlines() if line.strip()]
+
+
+def _build_block_finder_regex(keywords: list[str]) -> re.Pattern[str] | None:
+    if not keywords:
+        return None
+    escaped = [re.escape(keyword) for keyword in keywords]
+    # Sort by length to prioritize multi-word terms when regex engines backtrack.
+    escaped.sort(key=len, reverse=True)
+    return re.compile(rf"\b(?:{'|'.join(escaped)})\b(?!-)", re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_with_block_finder_cli(
+    input_tmp: str,
+    output_tmp: str,
+    keywords_file: str,
+    find_tables: bool,
+    find_figures: bool,
+) -> list[dict[str, Any]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "pdf2data.cli.block_finder",
+        input_tmp,
+        output_tmp,
+        keywords_file,
+        "--find_tables",
+        "true" if find_tables else "false",
+        "--find_figures",
+        "true" if find_figures else "false",
+    ]
+
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("Block Finder execution failed via pdf2data CLI.")
+
+    results_path = Path(output_tmp) / "found_blocks.json"
+    if not results_path.exists():
+        return []
+
+    with open(results_path, "r", encoding="utf-8") as f:
+        parsed = json.load(f)
+
+    if not isinstance(parsed, dict) or not parsed:
+        return []
+
+    doc_payload = parsed.get("document")
+    if not isinstance(doc_payload, dict):
+        doc_payload = next((value for value in parsed.values() if isinstance(value, dict)), {})
+
+    blocks = doc_payload.get("blocks", []) if isinstance(doc_payload, dict) else []
+    return [block for block in blocks if isinstance(block, dict)]
+
+
+def _block_finder_search_text(block: dict[str, Any]) -> str:
+    caption_text = str(block.get("caption") or block.get("legend") or "").strip()
+    if caption_text:
+        return caption_text
+
+    matrix = block.get("block", [])
+    if not isinstance(matrix, list):
+        return ""
+
+    cell_values: list[str] = []
+    for row in matrix:
+        if not isinstance(row, list):
+            continue
+        for entry in row:
+            cell_values.append(str(entry or "").strip())
+
+    return " ".join(value for value in cell_values if value).strip()
+
+
+def _block_signature(block: dict[str, Any]) -> tuple[Any, ...]:
+    raw_box = block.get("box") if isinstance(block.get("box"), list) else []
+    box = tuple(round(float(value), 5) for value in raw_box[:4]) if len(raw_box) == 4 else tuple()
+    return (
+        str(block.get("type") or ""),
+        safe_int(block.get("page", 0), 0),
+        box,
+        str(block.get("content") or "").strip(),
+        str(block.get("caption") or block.get("legend") or "").strip(),
+    )
+
+
+def _annotate_block_finder_blocks(
+    blocks: list[dict[str, Any]],
+    matched_blocks: list[dict[str, Any]],
+    keyword_regex: re.Pattern[str] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    matched_scores_by_signature: dict[tuple[Any, ...], list[int]] = {}
+
+    for block in matched_blocks:
+        text = _block_finder_search_text(block)
+        score = len(keyword_regex.findall(text)) if keyword_regex is not None and text else 1
+        signature = _block_signature(block)
+        matched_scores_by_signature.setdefault(signature, []).append(max(int(score), 1))
+
+    annotated: list[dict[str, Any]] = []
+    highlighted_count = 0
+
+    for block in blocks:
+        signature = _block_signature(block)
+        available_scores = matched_scores_by_signature.get(signature, [])
+        is_highlighted = len(available_scores) > 0
+        score = int(available_scores.pop(0)) if is_highlighted else 0
+        if is_highlighted:
+            highlighted_count += 1
+
+        annotated.append(
+            {
+                **block,
+                "block_finder_highlighted": is_highlighted,
+                "block_finder_match_score": score,
+            }
+        )
+
+    return annotated, highlighted_count
+
+
+def _prepare_payload_for_block_finder_cli(formatted_doc: dict[str, Any], blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    # Upstream BlockFinder expects metadata.doi and direct block keys like caption/block.
+    payload = dict(formatted_doc)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if not str(metadata.get("doi") or "").strip():
+        metadata = {**metadata, "doi": "unknown-doi"}
+    payload["metadata"] = metadata
+
+    normalized_blocks: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        normalized = dict(block)
+
+        if block_type in {"Table", "Figure"}:
+            caption = str(normalized.get("caption") or normalized.get("legend") or normalized.get("content") or "").strip()
+            normalized["caption"] = caption
+
+        if block_type == "Table":
+            matrix = normalized.get("block")
+            normalized["block"] = matrix if isinstance(matrix, list) else []
+
+        normalized_blocks.append(normalized)
+
+    payload["blocks"] = normalized_blocks
+    return payload
+
+
 # Annotate blocks with highlight and match-score metadata from matched texts.
 def _annotate_text_finder_blocks(blocks: list[dict[str, Any]], matched_texts: list[str]) -> tuple[list[dict[str, Any]], int]:
     content_scores = Counter(text.strip().replace("\n", " ") for text in matched_texts if str(text).strip())
@@ -960,8 +1118,7 @@ async def text_finder_action(payload: TextFinderPayload):
                 doc_folder = Path(input_tmp) / "document"
                 doc_folder.mkdir(parents=True, exist_ok=True)
 
-                doc_payload = dict(formatted)
-                doc_payload["blocks"] = blocks
+                doc_payload = _prepare_payload_for_block_finder_cli(formatted, blocks)
                 _write_json_file(doc_folder / "document_content.json", doc_payload)
 
                 _write_json_file(Path(keywords_tmp.name), keyword_weights)
@@ -1024,6 +1181,90 @@ async def text_finder_action(payload: TextFinderPayload):
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Text finder action failed: {exc}") from exc
+
+
+@app.post("/api/actions/block-finder")
+# Run keyword matching over table/figure blocks and return blocks annotated with block-finder highlights.
+async def block_finder_action(payload: BlockFinderPayload):
+    if not payload.find_tables and not payload.find_figures:
+        raise HTTPException(status_code=400, detail="Enable at least one target type: tables or figures.")
+
+    keywords_list = _normalize_block_finder_keywords(payload.keywords)
+    if not keywords_list:
+        raise HTTPException(status_code=400, detail="Keywords file is empty or invalid.")
+
+    keyword_regex = _build_block_finder_regex(keywords_list)
+
+    try:
+        formatted = format_as_content_json(dict(payload.data))
+        blocks = _prepare_blocks_for_upgrade(json.loads(json.dumps(formatted.get("blocks", []))))
+
+        with tempfile.TemporaryDirectory(prefix="pdfwf_blockfinder_in_") as input_tmp, tempfile.TemporaryDirectory(
+            prefix="pdfwf_blockfinder_out_"
+        ) as output_tmp, tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as keywords_tmp:
+            try:
+                doc_folder = Path(input_tmp) / "document"
+                doc_folder.mkdir(parents=True, exist_ok=True)
+
+                doc_payload = _prepare_payload_for_block_finder_cli(formatted, blocks)
+                _write_json_file(doc_folder / "document_content.json", doc_payload)
+
+                keywords_tmp.write("\n".join(keywords_list) + "\n")
+                keywords_tmp.flush()
+
+                matched_blocks = _extract_with_block_finder_cli(
+                    input_tmp=input_tmp,
+                    output_tmp=output_tmp,
+                    keywords_file=keywords_tmp.name,
+                    find_tables=bool(payload.find_tables),
+                    find_figures=bool(payload.find_figures),
+                )
+            finally:
+                try:
+                    os.unlink(keywords_tmp.name)
+                except Exception:
+                    pass
+
+        annotated_blocks, highlighted_count = _annotate_block_finder_blocks(blocks, matched_blocks, keyword_regex)
+
+        result = dict(formatted)
+        result["blocks"] = annotated_blocks
+        max_match_score = max((int(block.get("block_finder_match_score", 0)) for block in annotated_blocks), default=0)
+
+        return {
+            "summary": {
+                "blocks_before": len(blocks),
+                "blocks_after": highlighted_count,
+                "highlighted_count": highlighted_count,
+                "max_match_score": max_match_score,
+                "keywords_count": len(keywords_list),
+                "find_tables": bool(payload.find_tables),
+                "find_figures": bool(payload.find_figures),
+            },
+            "found_blocks_artifact": {
+                "blocks": [
+                    {
+                        **block,
+                        "block_finder_match_score": max(len(keyword_regex.findall(_block_finder_search_text(block))), 1)
+                        if keyword_regex is not None
+                        else 1,
+                    }
+                    for block in matched_blocks
+                ],
+                "total_matches": len(matched_blocks),
+                "unique_matches": len({_block_signature(block) for block in matched_blocks}),
+                "settings": {
+                    "find_tables": bool(payload.find_tables),
+                    "find_figures": bool(payload.find_figures),
+                },
+            },
+            "data": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Block finder action failed: {exc}") from exc
 
 
 @app.get("/api/assets/{doc_id}/{asset_path:path}")
