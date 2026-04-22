@@ -7,9 +7,24 @@ export type WorkflowPathItem = {
   id: string;
   action: WorkflowActionId;
   label: string;
-  status: 'done' | 'failed' | 'skipped';
+  status: 'done' | 'failed' | 'skipped' | 'running';
   detail?: string;
   timestamp: string;
+};
+
+export type WorkflowQueueItem = {
+  actionId: WorkflowActionId;
+  processor: string;
+  pdf2dataLayoutModel: string;
+  pdf2dataTableModel: string;
+  upgradeMode: UpgradeMode;
+  textFinderWordCountThreshold: number;
+  textFinderFindParagraphs: boolean;
+  textFinderFindSectionHeaders: boolean;
+  textFinderCountDuplicates: boolean;
+  blockFinderFindTables: boolean;
+  blockFinderFindFigures: boolean;
+  selected: boolean;
 };
 
 export const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
