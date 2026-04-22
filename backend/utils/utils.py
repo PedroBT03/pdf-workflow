@@ -1,4 +1,4 @@
-"""Helpers for PDF workflow content JSON files and per-document asset cache handling."""
+"""Helpers for PDF workflow content JSON files, asset caching, and file I/O."""
 
 from __future__ import annotations
 
@@ -90,6 +90,12 @@ def format_as_content_json(data: dict) -> dict:
         "blocks": formatted_blocks,
         "references": references,
     }
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    # Write a JSON object to file with formatting.
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def persist_extracted_assets(file_id: str, output_tmp: str, asset_root: Path | None = None) -> int:

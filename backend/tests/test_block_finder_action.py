@@ -9,8 +9,8 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture()
 def block_finder_stub(monkeypatch):
-    # Stub block finder CLI results to keep tests deterministic and independent from ML runtime.
-    def _stub(input_tmp, output_tmp, keywords_file, find_tables, find_figures):
+    # Stub block finder results by mocking extract_with_block_finder_cli in main module.
+    def _stub(input_tmp, output_tmp, keywords_file, find_tables, find_figures, run_cmd=None):
         if find_tables and not find_figures:
             return [
                 {
@@ -24,7 +24,7 @@ def block_finder_stub(monkeypatch):
             ]
         return []
 
-    monkeypatch.setattr(main, "_extract_with_block_finder_cli", _stub)
+    monkeypatch.setattr(main, "extract_with_block_finder_cli", _stub)
 
 
 def test_block_finder_highlights_table_matches(client, block_finder_stub):
@@ -151,14 +151,14 @@ def test_block_finder_requires_target_types(client):
 def test_block_finder_normalizes_missing_doi_before_cli(client, monkeypatch):
     captured: dict = {}
 
-    # Capture the temporary content file fed to upstream CLI and assert required keys exist.
-    def _capture_stub(input_tmp, output_tmp, keywords_file, find_tables, find_figures):
+    # Capture the temporary content file fed to upstream CLI by mocking extract_with_block_finder_cli in main module.
+    def _capture_stub(input_tmp, output_tmp, keywords_file, find_tables, find_figures, run_cmd=None):
         content_path = Path(input_tmp) / "document" / "document_content.json"
         with open(content_path, "r", encoding="utf-8") as f:
             captured["payload"] = json.load(f)
         return []
 
-    monkeypatch.setattr(main, "_extract_with_block_finder_cli", _capture_stub)
+    monkeypatch.setattr(main, "extract_with_block_finder_cli", _capture_stub)
 
     response = client.post(
         "/api/actions/block-finder",
