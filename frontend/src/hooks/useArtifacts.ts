@@ -16,6 +16,7 @@ export const useArtifacts = () => {
   const [textFinderFoundArtifact, setTextFinderFoundArtifact] = useState<any | null>(null);
   const [blockFinderArtifact, setBlockFinderArtifact] = useState<any | null>(null);
   const [blockFinderFoundArtifact, setBlockFinderFoundArtifact] = useState<any | null>(null);
+  const [blockExtractorArtifact, setBlockExtractorArtifact] = useState<any | null>(null);
 
   // Editor selection
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
@@ -56,6 +57,7 @@ export const useArtifacts = () => {
     setUpgradedJson(null);
     setTextFinderArtifact(null);
     setBlockFinderArtifact(null);
+    setBlockExtractorArtifact(null);
     setSelectedTarget(null);
     setSelectedContent('');
   }, []);
@@ -71,6 +73,7 @@ export const useArtifacts = () => {
     textFinderFoundArtifact, setTextFinderFoundArtifact,
     blockFinderArtifact, setBlockFinderArtifact,
     blockFinderFoundArtifact, setBlockFinderFoundArtifact,
+    blockExtractorArtifact, setBlockExtractorArtifact,
     selectedTarget, setSelectedTarget,
     selectedContent, setSelectedContent,
     outputFolderHandle, setOutputFolderHandle,

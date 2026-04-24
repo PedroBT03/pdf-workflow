@@ -43,7 +43,7 @@ export const TextFinderAction: React.FC<TextFinderProps> = ({
         <div className="flex items-center gap-2 mb-2">
           <label className="block text-xs text-zinc-400">Word count threshold</label>
           <span className="relative inline-flex group">
-            <Info className="h-4 w-4 text-zinc-500 cursor-help" />
+            <Info className="h-4 w-4 text-zinc-500 cursor-pointer" />
             <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 w-64 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2 text-[11px] leading-snug text-zinc-200 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
               {WORD_COUNT_THRESHOLD_HINT}
             </span>

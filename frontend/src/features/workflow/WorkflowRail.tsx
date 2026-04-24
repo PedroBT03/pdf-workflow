@@ -15,6 +15,7 @@ interface WorkflowRailProps {
   isLoading: boolean;
   onToggleSelected: (id: WorkflowActionId) => void;
   onRemove: (id: WorkflowActionId) => void;
+  onReorder: (draggedActionId: WorkflowActionId, targetActionId: WorkflowActionId) => void;
   onRunBatch: () => void;
   onClear: () => void;
 }
@@ -24,7 +25,7 @@ export const WorkflowRail: React.FC<WorkflowRailProps> = ({
   batchStatus, batchStatusDetail,
   workflowPath, plannedWorkflow,
   actionInProgress, isBatchRunning, isLoading,
-  onToggleSelected, onRemove, onRunBatch, onClear
+  onToggleSelected, onRemove, onReorder, onRunBatch, onClear
 }) => {
   const getStatusColor = () => {
     switch (batchStatus) {
@@ -89,6 +90,7 @@ export const WorkflowRail: React.FC<WorkflowRailProps> = ({
           isLoading={isLoading}
           onToggleSelected={onToggleSelected}
           onRemove={onRemove}
+          onReorder={onReorder}
           onRunBatch={onRunBatch}
           onClear={onClear}
         />

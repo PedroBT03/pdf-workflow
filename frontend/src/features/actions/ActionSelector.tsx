@@ -67,6 +67,8 @@ export const ActionSelector: React.FC<ActionSelectorProps> = ({
                 ? 'Edit action in progress'
                 : isLoading
                 ? 'Running action...'
+                : selectedAction === 'block_extractor'
+                ? 'Run block extractor'
                 : selectedAction === 'text_finder' || selectedAction === 'block_finder'
                 ? 'Generate highlighted artifact'
                 : 'Run action'}

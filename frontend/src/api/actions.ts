@@ -134,6 +134,37 @@ export async function runBlockFinder(params: {
 }
 
 /**
+ * Action: Block Extractor - Keep only table blocks from the current JSON artifact.
+ */
+export async function runBlockExtractor(params: {
+  file?: Blob | null;
+  filename?: string;
+  processor: string;
+  pdf2dataLayoutModel: string;
+  pdf2dataTableModel: string;
+  useExistingJson: boolean;
+  existingJson?: any;
+}) {
+  const formData = new FormData();
+  if (params.file) {
+    formData.append('file', params.file, params.filename || 'document.pdf');
+  }
+  formData.append('processor', params.processor);
+  formData.append('pdf2data_layout_model', params.pdf2dataLayoutModel);
+  formData.append('pdf2data_table_model', params.pdf2dataTableModel);
+  formData.append('use_existing_json', params.useExistingJson ? 'true' : 'false');
+  if (params.existingJson) {
+    formData.append('existing_json', JSON.stringify(params.existingJson));
+  }
+
+  const response = await fetch(`${API_BASE}/api/actions/block-extractor`, {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse(response);
+}
+
+/**
  * Fetch the asset manifest (images) for a document.
  */
 export async function fetchAssetManifest(docId: string) {

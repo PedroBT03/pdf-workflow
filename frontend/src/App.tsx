@@ -18,6 +18,7 @@ import { usePDFState, useWorkflow, useArtifacts } from './hooks';
 import { ArtifactsBar } from './components/layout/ArtifactsBar';
 import { ActionSelector } from './features/actions/ActionSelector';
 import { ExtractionAction } from './features/actions/ExtractionAction';
+import { BlockExtractorAction } from './features/actions/BlockExtractorAction';
 import { UpgradeAction } from './features/actions/UpgradeAction';
 import { TextFinderAction } from './features/actions/TextFinderAction';
 import { BlockFinderAction } from './features/actions/BlockFinderAction';
@@ -60,6 +61,8 @@ const App: React.FC = () => {
   const [bfFindFigures, setBfFindFigures] = useState(false);
   const [bfFile, setBfFile] = useState<File | null>(null);
   const [bfFileName, setBfFileName] = useState('No file selected');
+
+  const [beUseExistingJson, setBeUseExistingJson] = useState(true);
 
   const [pendingBatchResumeQueue, setPendingBatchResumeQueue] = useState<any[] | null>(null);
 
@@ -146,6 +149,7 @@ const App: React.FC = () => {
     workflow.resetWorkflowState();
     setSelectedAction('extract_json_from_pdf');
     setPendingBatchResumeQueue(null);
+    setBeUseExistingJson(true);
   };
 
   // Condition to check if an action can be ran
@@ -155,6 +159,7 @@ const App: React.FC = () => {
     if (action === 'upgrade_json') return artifacts.docData || artifacts.parsedData;
     if (action === 'text_finder') return (artifacts.docData || artifacts.parsedData) && !!tfFile;
     if (action === 'block_finder') return (artifacts.docData || artifacts.parsedData) && !!bfFile;
+    if (action === 'block_extractor') return !!pdf.pdfFile || !!(artifacts.docData || artifacts.parsedData);
     return false;
   };
 
@@ -269,6 +274,41 @@ const App: React.FC = () => {
     }
   };
 
+  const handleBlockExtractor = async () => {
+    const currentJson = artifacts.getWorkflowJsonArtifact();
+    const hasPdf = !!pdf.pdfFile;
+    const useFastPath = beUseExistingJson && !!currentJson;
+
+    if (!hasPdf && !useFastPath) return false;
+    workflow.setActionInProgress('block_extractor');
+    setLoading(true);
+    try {
+      const res = await api.runBlockExtractor({
+        file: hasPdf ? pdf.pdfFile : null,
+        filename: pdf.sourceFilename,
+        processor,
+        pdf2dataLayoutModel: layoutModel,
+        pdf2dataTableModel: tableModel,
+        useExistingJson: useFastPath,
+        existingJson: useFastPath ? currentJson : undefined,
+      });
+
+      const extractedArtifact = res.data;
+      artifacts.setBlockExtractorArtifact(extractedArtifact);
+      artifacts.workflowJsonRef.current = extractedArtifact;
+      artifacts.setJsonDraft(JSON.stringify(extractedArtifact, null, 2));
+
+      workflow.appendWorkflowPath('block_extractor', 'done', `Extracted ${res.summary?.tables_after ?? extractedArtifact?.blocks?.length ?? 0} tables`);
+      return true;
+    } catch (err: any) {
+      workflow.appendWorkflowPath('block_extractor', 'failed', err.message);
+      return false;
+    } finally {
+      setLoading(false);
+      workflow.setActionInProgress(null);
+    }
+  };
+
   const handleSaveEdit = async () => {
     if (!artifacts.selectedTarget || !artifacts.parsedData) return;
     setLoading(true);
@@ -327,7 +367,10 @@ const App: React.FC = () => {
       }
       
       setProcessor(nextItem.processor);
+      setLayoutModel(nextItem.pdf2dataLayoutModel);
+      setTableModel(nextItem.pdf2dataTableModel);
       setUpgradeMode(nextItem.upgradeMode);
+      setBeUseExistingJson(Boolean(nextItem.blockExtractorUseExistingJson ?? true));
       setSelectedAction(nextAction);
 
       if (nextAction === 'edit_json') {
@@ -342,6 +385,7 @@ const App: React.FC = () => {
       else if (nextAction === 'upgrade_json') ok = await handleUpgrade();
       else if (nextAction === 'text_finder') ok = await handleTextFinder();
       else if (nextAction === 'block_finder') ok = await handleBlockFinder();
+      else if (nextAction === 'block_extractor') ok = await handleBlockExtractor();
       
       if (!ok) {
         workflow.setIsBatchRunning(false);
@@ -510,6 +554,15 @@ const App: React.FC = () => {
         });
       }
 
+      if (artifacts.blockExtractorArtifact) {
+        const blockExtractorSnapshot = cloneJson(artifacts.blockExtractorArtifact);
+        rewriteAssetPaths(blockExtractorSnapshot, exportedAssetPaths);
+        snapshots.push({
+          name: `${folderName}_block_extractor_content.json`,
+          data: toCanonicalContentJson(blockExtractorSnapshot),
+        });
+      }
+
       for (const item of snapshots) {
         const fileHandle = await docFolder.getFileHandle(item.name, { create: true });
         const writable = await fileHandle.createWritable();
@@ -559,6 +612,7 @@ const App: React.FC = () => {
               hasUpgradedArtifact={!!artifacts.upgradedJson}
               hasTextFinderArtifact={!!artifacts.textFinderArtifact}
               hasBlockFinderArtifact={!!artifacts.blockFinderArtifact}
+              hasBlockExtractorArtifact={!!artifacts.blockExtractorArtifact}
             />
 
             <div className="grid gap-6" style={{ gridTemplateColumns: '360px minmax(0, 1fr)' }}>
@@ -575,13 +629,17 @@ const App: React.FC = () => {
                     if (selectedAction === 'upgrade_json') handleUpgrade();
                     if (selectedAction === 'text_finder') handleTextFinder();
                     if (selectedAction === 'block_finder') handleBlockFinder();
+                    if (selectedAction === 'block_extractor') handleBlockExtractor();
                     if (selectedAction === 'edit_json') workflow.setActionInProgress('edit_json');
                   }}
                   onAddActionToWorkflow={() => {
                     workflow.addToQueue({
                       actionId: selectedAction,
                       processor,
+                      pdf2dataLayoutModel: layoutModel,
+                      pdf2dataTableModel: tableModel,
                       upgradeMode,
+                      blockExtractorUseExistingJson: beUseExistingJson,
                       selected: true,
                     } as any);
                     workflow.setActiveWorkflowView('queue');
@@ -636,6 +694,22 @@ const App: React.FC = () => {
                         setBfFile(file);
                         setBfFileName(file?.name || 'No file selected');
                       }}
+                    />
+                  )}
+                  {selectedAction === 'block_extractor' && (
+                    <BlockExtractorAction
+                      processor={processor}
+                      setProcessor={setProcessor}
+                      processorOptions={processorOptions}
+                      processorLoadWarning={null}
+                      pdf2dataLayoutModel={layoutModel}
+                      setPdf2dataLayoutModel={setLayoutModel}
+                      pdf2dataTableModel={tableModel}
+                      setPdf2dataTableModel={setTableModel}
+                      useExistingJson={beUseExistingJson}
+                      setUseExistingJson={setBeUseExistingJson}
+                      hasJsonArtifact={!!(artifacts.docData || artifacts.parsedData)}
+                      isActionInProgress={loading}
                     />
                   )}
                   {selectedAction === 'edit_json' && (
@@ -708,6 +782,7 @@ const App: React.FC = () => {
               isLoading={loading}
               onToggleSelected={workflow.toggleActionSelected}
               onRemove={workflow.removeFromQueue}
+              onReorder={workflow.reorderQueue}
               onRunBatch={runBatchWorkflow}
               onClear={workflow.clearQueue}
             />

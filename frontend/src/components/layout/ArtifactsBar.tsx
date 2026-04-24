@@ -8,6 +8,7 @@ interface ArtifactsBarProps {
   hasUpgradedArtifact: boolean;
   hasTextFinderArtifact: boolean;
   hasBlockFinderArtifact: boolean;
+  hasBlockExtractorArtifact: boolean;
 }
 
 /**
@@ -35,6 +36,7 @@ export const ArtifactsBar: React.FC<ArtifactsBarProps> = ({
   hasUpgradedArtifact,
   hasTextFinderArtifact,
   hasBlockFinderArtifact,
+  hasBlockExtractorArtifact,
 }) => {
   return (
     <div className="w-full mb-3">
@@ -55,6 +57,7 @@ export const ArtifactsBar: React.FC<ArtifactsBarProps> = ({
           <StatusBadge label="Upgraded" isAvailable={hasUpgradedArtifact} />
           <StatusBadge label="Text Finder" isAvailable={hasTextFinderArtifact} />
           <StatusBadge label="Block Finder" isAvailable={hasBlockFinderArtifact} />
+          <StatusBadge label="Block Extractor" isAvailable={hasBlockExtractorArtifact} />
         </div>
       </div>
     </div>

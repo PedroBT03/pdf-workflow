@@ -1,6 +1,6 @@
 // Workflow types and labels used by the action-based UI and execution path.
 
-export type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json' | 'text_finder' | 'block_finder';
+export type WorkflowActionId = 'extract_json_from_pdf' | 'edit_json' | 'upgrade_json' | 'text_finder' | 'block_finder' | 'block_extractor';
 export type UpgradeMode = 'text' | 'figures' | 'both';
 
 export type WorkflowPathItem = {
@@ -18,6 +18,7 @@ export type WorkflowQueueItem = {
   pdf2dataLayoutModel: string;
   pdf2dataTableModel: string;
   upgradeMode: UpgradeMode;
+  blockExtractorUseExistingJson?: boolean;
   textFinderWordCountThreshold: number;
   textFinderFindParagraphs: boolean;
   textFinderFindSectionHeaders: boolean;
@@ -33,6 +34,7 @@ export const WORKFLOW_ACTION_LABELS: Record<WorkflowActionId, string> = {
   upgrade_json: 'Upgrade JSON',
   text_finder: 'Text Finder',
   block_finder: 'Block Finder',
+  block_extractor: 'Block Extractor',
 };
 
 export const UPGRADE_MODE_LABELS: Record<UpgradeMode, string> = {

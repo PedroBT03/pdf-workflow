@@ -43,6 +43,20 @@ export const useWorkflow = () => {
     ));
   };
 
+  const reorderQueue = (draggedActionId: WorkflowActionId, targetActionId: WorkflowActionId) => {
+    setPlannedWorkflow((prev) => {
+      const fromIndex = prev.findIndex((item) => item.actionId === draggedActionId);
+      const toIndex = prev.findIndex((item) => item.actionId === targetActionId);
+
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return prev;
+
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  };
+
   const clearQueue = () => setPlannedWorkflow([]);
 
   const resetWorkflowState = useCallback(() => {
@@ -71,6 +85,7 @@ export const useWorkflow = () => {
     addToQueue,
     removeFromQueue,
     toggleActionSelected,
+    reorderQueue,
     clearQueue,
     resetWorkflowState
   };

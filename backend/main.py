@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from actions import extract_json_from_pdf as extract_action
+from actions.block_extractor import *
 from actions.block_finder import *
 from actions.edit_json import *
 from actions.extract_json_from_pdf import *
@@ -185,6 +186,39 @@ async def block_finder_action(payload: BlockFinderPayload):
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Block finder action failed: {exc}") from exc
+
+
+@app.post("/api/actions/block-extractor")
+# Extract table blocks from the PDF using pdf2data-tools; optionally reuse an existing JSON artifact as a fast path.
+async def block_extractor_action(
+    file: UploadFile | None = File(None),
+    processor: str = Form("pdf2data"),
+    pdf2data_layout_model: str = Form(PDF2DATA_LAYOUT_AUTO),
+    pdf2data_table_model: str = Form("none"),
+    use_existing_json: bool = Form(False),
+    existing_json: str = Form(""),
+):
+    try:
+        return run_block_extractor_action(
+            file=file,
+            processor=processor,
+            pdf2data_layout_model=pdf2data_layout_model,
+            pdf2data_table_model=pdf2data_table_model,
+            use_existing_json=use_existing_json,
+            existing_json=existing_json,
+            require_modules_fn=require_modules,
+            require_torchvision_runtime_fn=require_torchvision_runtime,
+            extract_with_block_extractor_cli_fn=lambda **kwargs: extract_with_block_extractor_cli(run_cmd=subprocess.run, **kwargs),
+            read_native_content_envelope_fn=read_native_content_envelope,
+            persist_extracted_assets_fn=persist_extracted_assets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Block extractor action failed: {exc}") from exc
 
 
 @app.get("/api/assets/{doc_id}/{asset_path:path}")
