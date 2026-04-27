@@ -1,5 +1,5 @@
 import React from 'react';
-import { FolderOpen, Info } from 'lucide-react';
+import { FolderOpen, Info, Search } from 'lucide-react';
 
 interface TextFinderProps {
   threshold: number;
@@ -26,7 +26,19 @@ export const TextFinderAction: React.FC<TextFinderProps> = ({
   isActionInProgress
 }) => {
   return (
-    <div className="grid gap-3 min-w-0">
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3 space-y-3 min-w-0">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-300">
+          <Search className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-zinc-100">Text Finder</div>
+          <div className="mt-1 text-[11px] leading-snug text-zinc-500">
+            Scores text blocks against weighted keywords and highlights matching content.
+          </div>
+        </div>
+      </div>
+
       {/* JSON File Upload */}
       <div className="min-w-0">
         <label className="block text-xs text-zinc-400 mb-2">Keywords JSON file</label>

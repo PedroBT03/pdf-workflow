@@ -1,4 +1,5 @@
 import React from 'react';
+import { WandSparkles } from 'lucide-react';
 import { UpgradeMode, UPGRADE_MODE_LABELS } from '../../lib/workflow';
 
 interface UpgradeActionProps {
@@ -13,7 +14,19 @@ export const UpgradeAction: React.FC<UpgradeActionProps> = ({
   isActionInProgress,
 }) => {
   return (
-    <div className="grid gap-4">
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3 space-y-4">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-300">
+          <WandSparkles className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-zinc-100">Upgrade JSON</div>
+          <div className="mt-1 text-[11px] leading-snug text-zinc-500">
+            Applies cleanup and merge logic to improve extracted metadata quality.
+          </div>
+        </div>
+      </div>
+
       <div>
         <label className="block text-xs text-zinc-400 mb-2">
           Upgrade Strategy
