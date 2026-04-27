@@ -213,13 +213,17 @@ def run_block_extractor_from_pdf(
     elif pipeline_name == "MinerUVL":
         raise RuntimeError("Processor temporarily disabled: mineruvl is not enabled in this build.")
 
-    blocks_data = extract_with_block_extractor_cli_fn(
+    extractor_payload = extract_with_block_extractor_cli_fn(
         input_tmp=input_tmp,
         output_tmp=output_tmp,
         processor_alias=processor_alias,
         pdf2data_layout_model=pdf2data_layout_model,
         pdf2data_table_model=pdf2data_table_model,
     )
+
+    blocks_data = extractor_payload.get("blocks", []) if isinstance(extractor_payload, dict) else []
+    if not isinstance(blocks_data, list):
+        blocks_data = []
 
     native_content = read_native_content_envelope_fn(output_tmp)
     copied_assets = persist_extracted_assets_fn(file_id=file_id, output_tmp=output_tmp)
@@ -262,8 +266,8 @@ def run_block_extractor_from_pdf(
             "pdf2data_layout_model": pdf2data_layout_model,
             "pdf2data_table_model": pdf2data_table_model,
         },
-        "metadata": native_content["metadata"],
-        "references": native_content["references"],
+        "metadata": native_content.get("metadata", {}),
+        "references": native_content.get("references", []),
         "blocks": blocks_data,
         "pdf_size": pdf_size,
         "page_sizes": page_sizes,

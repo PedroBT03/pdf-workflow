@@ -50,6 +50,7 @@ export const buildFinderExportSnapshot = (
 export interface ExportContext {
   parsedData: any;
   docData: any;
+  pdfFile: Blob | null;
   editedJson: any;
   upgradedJson: any;
   textFinderArtifact: any;
@@ -68,8 +69,8 @@ export interface ExportContext {
 }
 
 export const handleExport = async (context: ExportContext): Promise<string> => {
-  if (!context.parsedData || !context.outputFolderHandle) {
-    throw new Error('Missing parsed data or output folder');
+  if (!context.outputFolderHandle) {
+    throw new Error('Missing output folder');
   }
 
   const baseName = context.sourceFilename.replace(/\.[^/.]+$/, '') || 'metadata';
@@ -79,41 +80,57 @@ export const handleExport = async (context: ExportContext): Promise<string> => {
   const docFolder = await context.outputFolderHandle.getDirectoryHandle(folderName, { create: true });
   const imagesFolder = await docFolder.getDirectoryHandle(`${folderName}_images`, { create: true });
 
+  // Allow export without JSON artifacts: save the original PDF when available.
+  if (!context.parsedData && !context.docData) {
+    if (!context.pdfFile) {
+      throw new Error('No PDF or JSON artifact available to export.');
+    }
+    const pdfFileName = context.sourceFilename.toLowerCase().endsWith('.pdf')
+      ? context.sourceFilename
+      : `${folderName}.pdf`;
+    const pdfHandle = await docFolder.getFileHandle(pdfFileName, { create: true });
+    const pdfWritable = await pdfHandle.createWritable();
+    await pdfWritable.write(context.pdfFile);
+    await pdfWritable.close();
+    return 'Export completed successfully (PDF only).';
+  }
+
   const docId = String(context.docData?.id || '').trim();
-  if (!docId) throw new Error('Missing document id for asset export. Upload the PDF again.');
-
-  const manifestPayload = await api.fetchAssetManifest(docId);
-  const manifestAssets: string[] = Array.isArray(manifestPayload?.assets) ? manifestPayload.assets : [];
-
   const exportedAssetPaths = new Map<string, string>();
 
-  for (const rawPath of manifestAssets) {
-    const trimmedPath = String(rawPath || '').trim();
-    if (!trimmedPath) continue;
+  // Asset export is optional: it only runs when a backend document id is available.
+  if (docId) {
+    const manifestPayload = await api.fetchAssetManifest(docId);
+    const manifestAssets: string[] = Array.isArray(manifestPayload?.assets) ? manifestPayload.assets : [];
 
-    const normalizedRelative = stripNativeImagesPrefix(trimmedPath);
-    const safeSegments = sanitizePathSegments(normalizedRelative);
-    if (!safeSegments.length) continue;
+    for (const rawPath of manifestAssets) {
+      const trimmedPath = String(rawPath || '').trim();
+      if (!trimmedPath) continue;
 
-    try {
-      const response = await fetch(buildAssetUrl(docId, trimmedPath));
-      if (!response.ok) continue;
+      const normalizedRelative = stripNativeImagesPrefix(trimmedPath);
+      const safeSegments = sanitizePathSegments(normalizedRelative);
+      if (!safeSegments.length) continue;
 
-      const blob = await response.blob();
-      let targetDir = imagesFolder;
-      for (const segment of safeSegments.slice(0, -1)) {
-        targetDir = await targetDir.getDirectoryHandle(segment, { create: true });
+      try {
+        const response = await fetch(buildAssetUrl(docId, trimmedPath));
+        if (!response.ok) continue;
+
+        const blob = await response.blob();
+        let targetDir = imagesFolder;
+        for (const segment of safeSegments.slice(0, -1)) {
+          targetDir = await targetDir.getDirectoryHandle(segment, { create: true });
+        }
+
+        const fileName = safeSegments[safeSegments.length - 1];
+        const imageFileHandle = await targetDir.getFileHandle(fileName, { create: true });
+        const imageWritable = await imageFileHandle.createWritable();
+        await imageWritable.write(blob);
+        await imageWritable.close();
+
+        exportedAssetPaths.set(trimmedPath, `${folderName}_images/${safeSegments.join('/')}`);
+      } catch {
+        /* skip failed image */
       }
-
-      const fileName = safeSegments[safeSegments.length - 1];
-      const imageFileHandle = await targetDir.getFileHandle(fileName, { create: true });
-      const imageWritable = await imageFileHandle.createWritable();
-      await imageWritable.write(blob);
-      await imageWritable.close();
-
-      exportedAssetPaths.set(trimmedPath, `${folderName}_images/${safeSegments.join('/')}`);
-    } catch {
-      /* skip failed image */
     }
   }
 

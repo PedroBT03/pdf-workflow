@@ -195,7 +195,10 @@ export const handleBlockExtractor = async (
       existingJson: useFastPath ? currentJson : undefined,
     });
 
-    const extractedArtifact = res.data;
+    const extractedArtifact = res?.data ?? res;
+    if (!extractedArtifact || typeof extractedArtifact !== 'object') {
+      throw new Error('Block extractor returned an invalid payload.');
+    }
     deps.artifacts.setBlockExtractorArtifact(extractedArtifact);
     deps.artifacts.workflowJsonRef.current = extractedArtifact;
     deps.artifacts.setJsonDraft(JSON.stringify(extractedArtifact, null, 2));

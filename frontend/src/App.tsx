@@ -413,6 +413,7 @@ const App: React.FC = () => {
                   const exportContext: ExportContext = {
                     parsedData: artifacts.parsedData,
                     docData: artifacts.docData,
+                    pdfFile: pdf.pdfFile,
                     editedJson: artifacts.editedJson,
                     upgradedJson: artifacts.upgradedJson,
                     textFinderArtifact: artifacts.textFinderArtifact,
@@ -436,7 +437,7 @@ const App: React.FC = () => {
                 }
               }}
               exportFeedback={artifacts.exportFeedback}
-              isExportDisabled={!artifacts.docData}
+              isExportDisabled={!pdf.pdfFile}
             />
             <WorkflowRail 
               activeView={workflow.activeWorkflowView}
