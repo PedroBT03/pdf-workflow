@@ -25,7 +25,6 @@ pyinstaller \
   --noconfirm \
   --onedir \
   --name pdf-workflow \
-  --additional-hooks-dir ../pyinstaller_hooks \
   --collect-all doclayout_yolo \
   --collect-all paddleocr \
   --collect-all pdf2data \
@@ -43,16 +42,32 @@ pyinstaller \
   --collect-all transformers \
   --collect-all torch \
   --collect-all torchvision \
+  --copy-metadata docling \
+  --copy-metadata docling-ibm-models \
+  --copy-metadata docling_core \
+  --copy-metadata docling-parse \
+  --copy-metadata rapidocr \
+  --hidden-import docling \
+  --hidden-import docling_core \
+  --hidden-import docling_parse \
+  --hidden-import rapidocr \
+  --hidden-import docling.backend \
+  --hidden-import docling.backend.asciidoc_backend \
+  --hidden-import docling.datamodel \
+  --hidden-import docling.datamodel.document \
+  --hidden-import pdf2image \
+  --hidden-import pikepdf \
   --hidden-import pycocotools \
   --hidden-import pycocotools._mask \
   --add-data "../frontend/dist:frontend/dist" \
   main.py
 
+# Move executable to project root
+mv "${BACKEND_DIR}/dist/pdf-workflow/pdf-workflow" "${PROJECT_ROOT}/pdf-workflow"
 mv "${BACKEND_DIR}/dist/pdf-workflow/_internal" "${PROJECT_ROOT}/_internal"
 chmod +x "${PROJECT_ROOT}/pdf-workflow"
 
 # Remove non-essential build leftovers.
-rm -rf "${BACKEND_DIR}/dist" "${BACKEND_DIR}/build" "${BACKEND_DIR}/"al build leftovers.
-rm -rf dist build ./*.spec
+rm -rf "${BACKEND_DIR}/dist" "${BACKEND_DIR}/build" "${BACKEND_DIR}/"*.spec
 
 echo "Build complete. Run: ${PROJECT_ROOT}/pdf-workflow"
