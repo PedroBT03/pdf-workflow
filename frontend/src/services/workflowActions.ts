@@ -30,8 +30,10 @@ export const handleExtract = async (
       tableModel
     );
     deps.artifacts.setDocData(data);
+    deps.artifacts.extractedJsonRef.current = data;
     deps.artifacts.workflowJsonRef.current = data;
     deps.artifacts.setJsonDraft(JSON.stringify(data, null, 2));
+    deps.artifacts.setActivePdfArtifact('docData');
     deps.artifacts.setSelectedTarget(null);
     deps.artifacts.setSelectedContent('');
 
@@ -50,10 +52,14 @@ export const handleExtract = async (
 
 export const handleUpgrade = async (
   upgradeMode: any,
-  deps: WorkflowActionDependencies
+  deps: WorkflowActionDependencies,
+  sourceJson?: any
 ): Promise<boolean> => {
-  const currentJson = deps.artifacts.getWorkflowJsonArtifact();
-  if (!currentJson) return false;
+  const currentJson = sourceJson ?? deps.artifacts.getExtractedJsonArtifact();
+  if (!currentJson) {
+    deps.workflow.setWorkflowMessage({ type: 'error', message: 'No extracted JSON available. Run Extract JSON from PDF first.' });
+    return false;
+  }
   deps.workflow.setActionInProgress('upgrade_json');
   deps.setLoading(true);
   try {
@@ -61,6 +67,7 @@ export const handleUpgrade = async (
     deps.artifacts.setUpgradedJson(res.data);
     deps.artifacts.workflowJsonRef.current = res.data;
     deps.artifacts.setJsonDraft(JSON.stringify(res.data, null, 2));
+    deps.artifacts.setActivePdfArtifact('upgradedJson');
     deps.workflow.appendWorkflowPath('upgrade_json', 'done', `Mode: ${upgradeMode}`);
     return true;
   } catch (err: any) {
@@ -78,10 +85,16 @@ export const handleTextFinder = async (
   tfFindParagraphs: boolean,
   tfFindSectionHeaders: boolean,
   tfCountDuplicates: boolean,
-  deps: WorkflowActionDependencies
+  deps: WorkflowActionDependencies,
+  sourceJson?: any
 ): Promise<boolean> => {
-  const currentJson = deps.artifacts.getWorkflowJsonArtifact();
-  if (!currentJson || !tfFile) return false;
+  const currentJson = sourceJson ?? deps.artifacts.getExtractedJsonArtifact();
+  if (!currentJson || !tfFile) {
+    if (!currentJson) {
+      deps.workflow.setWorkflowMessage({ type: 'error', message: 'No extracted JSON available. Run Extract JSON from PDF first.' });
+    }
+    return false;
+  }
   deps.workflow.setActionInProgress('text_finder');
   deps.setLoading(true);
   try {
@@ -107,6 +120,7 @@ export const handleTextFinder = async (
     deps.artifacts.setTextFinderArtifact(highlightedArtifact);
     deps.artifacts.workflowJsonRef.current = highlightedArtifact;
     deps.artifacts.setJsonDraft(JSON.stringify(highlightedArtifact, null, 2));
+    deps.artifacts.setActivePdfArtifact('textFinderArtifact');
 
     deps.workflow.appendWorkflowPath(
       'text_finder',
@@ -127,10 +141,16 @@ export const handleBlockFinder = async (
   bfFile: File | null,
   bfFindTables: boolean,
   bfFindFigures: boolean,
-  deps: WorkflowActionDependencies
+  deps: WorkflowActionDependencies,
+  sourceJson?: any
 ): Promise<boolean> => {
-  const currentJson = deps.artifacts.getWorkflowJsonArtifact();
-  if (!currentJson || !bfFile) return false;
+  const currentJson = sourceJson ?? deps.artifacts.getExtractedJsonArtifact();
+  if (!currentJson || !bfFile) {
+    if (!currentJson) {
+      deps.workflow.setWorkflowMessage({ type: 'error', message: 'No extracted JSON available. Run Extract JSON from PDF first.' });
+    }
+    return false;
+  }
   deps.workflow.setActionInProgress('block_finder');
   deps.setLoading(true);
   try {
@@ -154,6 +174,7 @@ export const handleBlockFinder = async (
     deps.artifacts.setBlockFinderArtifact(highlightedArtifact);
     deps.artifacts.workflowJsonRef.current = highlightedArtifact;
     deps.artifacts.setJsonDraft(JSON.stringify(highlightedArtifact, null, 2));
+    deps.artifacts.setActivePdfArtifact('blockFinderArtifact');
 
     deps.workflow.appendWorkflowPath(
       'block_finder',
@@ -175,9 +196,10 @@ export const handleBlockExtractor = async (
   layoutModel: string,
   tableModel: string,
   beUseExistingJson: boolean,
-  deps: WorkflowActionDependencies
+  deps: WorkflowActionDependencies,
+  sourceJson?: any
 ): Promise<boolean> => {
-  const currentJson = deps.artifacts.getWorkflowJsonArtifact();
+  const currentJson = sourceJson ?? deps.artifacts.getExtractedJsonArtifact();
   const hasPdf = !!deps.pdf.pdfFile;
   const useFastPath = beUseExistingJson && !!currentJson;
 
@@ -202,6 +224,7 @@ export const handleBlockExtractor = async (
     deps.artifacts.setBlockExtractorArtifact(extractedArtifact);
     deps.artifacts.workflowJsonRef.current = extractedArtifact;
     deps.artifacts.setJsonDraft(JSON.stringify(extractedArtifact, null, 2));
+    deps.artifacts.setActivePdfArtifact('blockExtractorArtifact');
 
     deps.workflow.appendWorkflowPath(
       'block_extractor',
@@ -276,6 +299,7 @@ export const handleSaveEdit = async (
       deps.artifacts.setJsonDraft(JSON.stringify(nextJson, null, 2));
       deps.artifacts.setEditedJson(nextJson);
       deps.artifacts.setHasEditedJson(true);
+      deps.artifacts.setActivePdfArtifact('editedJson');
 
       if (deps.artifacts.textFinderArtifact) {
         deps.artifacts.setTextFinderArtifact(nextJson);

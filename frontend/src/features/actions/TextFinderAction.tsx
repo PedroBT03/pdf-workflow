@@ -66,7 +66,7 @@ export const TextFinderAction: React.FC<TextFinderProps> = ({
           value={threshold}
           onChange={(e) => setThreshold(Number(e.target.value || 0))}
           disabled={isActionInProgress}
-          className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500"
+          className="threshold-number-input w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-zinc-200 outline-none focus:border-blue-500"
         />
       </div>
 

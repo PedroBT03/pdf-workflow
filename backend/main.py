@@ -4,11 +4,13 @@ import subprocess
 import tempfile
 import traceback
 import uuid
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from actions import extract_json_from_pdf as extract_action
 from actions.block_extractor import *
@@ -29,6 +31,12 @@ from utils.utils import (
 FRIENDLY_PROCESSOR_ALIASES = extract_action.FRIENDLY_PROCESSOR_ALIASES
 PDF2DATA_LAYOUT_AUTO = extract_action.PDF2DATA_LAYOUT_AUTO
 
+
+def get_project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent.parent
+
 app = FastAPI()
 
 app.add_middleware(
@@ -39,12 +47,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount frontend static files
+frontend_dist = get_project_root() / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+
 
 # TODO: DEV
 # Development endpoint: load test JSON from file to bypass PDF extraction.
 @app.get("/api/dev/load-test-json")
 async def load_test_json():
-    file_path = Path("../test_content.json")
+    file_path = get_project_root() / "test_content.json"
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Ficheiro test_content.json não encontrado na raiz.")
@@ -245,6 +258,25 @@ async def get_assets_manifest(doc_id: str):
         "doc_id": doc_id,
         "assets": list_cached_assets(doc_id=doc_id, asset_root=ASSET_CACHE_ROOT),
     }
+
+
+@app.get("/")
+async def serve_frontend_index():
+    index_file = frontend_dist / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not built")
+    return FileResponse(index_file)
+
+
+@app.get("/{full_path:path}")
+async def serve_frontend_spa(full_path: str):
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    index_file = frontend_dist / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not built")
+    return FileResponse(index_file)
 
 
 if __name__ == "__main__":

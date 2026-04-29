@@ -59,6 +59,63 @@ def prepare_blocks_for_block_extractor(blocks: list[Any]) -> list[dict[str, Any]
     return prepared
 
 
+def _run_pdf2data_direct(
+    input_tmp: str,
+    output_tmp: str,
+    layout_model: str,
+    table_model: str | None,
+    layout_model_threshold: str,
+    table_model_threshold: str,
+) -> None:
+    """Execute pdf2data directly using the Python API to avoid frozen CLI subprocess issues."""
+    temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+    pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+    os.makedirs(pdf2doi_config_dir, exist_ok=True)
+
+    previous_home = os.environ.get("HOME")
+    previous_userprofile = os.environ.get("USERPROFILE")
+    previous_pdf2doi_config = os.environ.get("PDF2DOI_CONFIG_DIR")
+
+    try:
+        os.environ["HOME"] = temp_home
+        os.environ["USERPROFILE"] = temp_home
+        os.environ["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
+
+        from pdf2data.pdf2data_pipeline import PDF2Data
+
+        pdf2data_pipeline = PDF2Data(
+            layout_model=layout_model,
+            layout_model_threshold=float(layout_model_threshold),
+            table_model=table_model,
+            table_model_threshold=float(table_model_threshold),
+            table_structure_model="microsoft/table-structure-recognition-v1.1-all",
+            device="cpu",
+            input_folder=input_tmp,
+            output_folder=output_tmp,
+            extract_tables=True,
+            extract_figures=True,
+            extract_text=True,
+            extract_equations=True,
+            extract_references=False,
+        )
+        pdf2data_pipeline.pdf_transform()
+    finally:
+        if previous_home:
+            os.environ["HOME"] = previous_home
+        else:
+            os.environ.pop("HOME", None)
+        if previous_userprofile:
+            os.environ["USERPROFILE"] = previous_userprofile
+        else:
+            os.environ.pop("USERPROFILE", None)
+        if previous_pdf2doi_config:
+            os.environ["PDF2DOI_CONFIG_DIR"] = previous_pdf2doi_config
+        else:
+            os.environ.pop("PDF2DOI_CONFIG_DIR", None)
+
+        shutil.rmtree(temp_home, ignore_errors=True)
+
+
 # Keep only table-compatible blocks in canonical content JSON format.
 def _normalize_block_extractor_result(data: dict[str, Any]) -> dict[str, Any]:
     formatted = format_as_content_json(dict(data))
@@ -111,10 +168,7 @@ def extract_with_block_extractor_cli(
             "Invalid pdf2data table model. Use 'none' or 'microsoft/table-transformer-detection'."
         )
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "pdf2data.cli.block_extractor",
+    cli_args = [
         input_tmp,
         output_tmp,
         "--pipeline",
@@ -131,38 +185,59 @@ def extract_with_block_extractor_cli(
         "cpu",
     ]
     if requested_table_model:
-        cmd.extend(["--table_model", requested_table_model])
+        cli_args.extend(["--table_model", requested_table_model])
 
     child_env = os.environ.copy()
     child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     child_env.setdefault("OMP_NUM_THREADS", "1")
     child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    
+    # For frozen PyInstaller builds, provide temporary config directory for pdf2doi
+    import tempfile
+    temp_home = None
+    if getattr(sys, "frozen", False):
+        temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+        pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+        os.makedirs(pdf2doi_config_dir, exist_ok=True)
+        child_env["HOME"] = temp_home
+        child_env["USERPROFILE"] = temp_home
+        child_env["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
 
     try:
-        result = run_cmd(
-            cmd,
-            check=False,
-            timeout=900,
-            env=child_env,
-            capture_output=True,
-            text=True,
-        )
+        if getattr(sys, "frozen", False):
+            _run_pdf2data_direct(
+                input_tmp=input_tmp,
+                output_tmp=output_tmp,
+                layout_model=layout_model,
+                table_model=requested_table_model,
+                layout_model_threshold="0.7",
+                table_model_threshold="0.5",
+            )
+        else:
+            cmd = [sys.executable, "-m", "pdf2data.cli.block_extractor", *cli_args]
+            result = run_cmd(
+                cmd,
+                check=False,
+                timeout=900,
+                env=child_env,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                stderr_text = result.stderr or ""
+                try:
+                    find_first_content_json(output_tmp)
+                    has_content = True
+                except Exception:
+                    has_content = False
+
+                if has_content and "anystyle" in stderr_text.lower():
+                    pass
+                else:
+                    raise RuntimeError("Block extractor execution failed via pdf2data CLI.")
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Block extractor timed out during conversion.") from exc
-
-    if result.returncode != 0:
-        stderr_text = result.stderr or ""
-        try:
-            find_first_content_json(output_tmp)
-            has_content = True
-        except Exception:
-            has_content = False
-
-        if has_content and "anystyle" in stderr_text.lower():
-            pass
-        else:
-            raise RuntimeError("Block extractor execution failed via pdf2data CLI.")
 
     content_path = find_first_content_json(output_tmp)
     with open(content_path, "r", encoding="utf-8") as f:

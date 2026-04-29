@@ -82,6 +82,9 @@ const App: React.FC = () => {
 
   const [pendingBatchResumeQueue, setPendingBatchResumeQueue] = useState<any[] | null>(null);
 
+  const visualizedArtifact = artifacts.getActivePdfArtifact();
+  const visualizedBlocks = Array.isArray(visualizedArtifact?.blocks) ? visualizedArtifact.blocks : [];
+
   // Load available processors on mount
   useEffect(() => {
     api.fetchProcessors()
@@ -143,18 +146,18 @@ const App: React.FC = () => {
       onSetBeUseExistingJson: setBeUseExistingJson,
       onSetSelectedAction: setSelectedAction,
       onHandleExtract: () => handleExtract(processor, layoutModel, tableModel, { workflow, artifacts, pdf, setLoading }),
-      onHandleUpgrade: () => handleUpgrade(upgradeMode, { workflow, artifacts, pdf, setLoading }),
-      onHandleTextFinder: () =>
+      onHandleUpgrade: (sourceJson) => handleUpgrade(upgradeMode, { workflow, artifacts, pdf, setLoading }, sourceJson),
+      onHandleTextFinder: (sourceJson) =>
         handleTextFinder(tfFile, tfThreshold, tfFindParagraphs, tfFindSectionHeaders, tfCountDuplicates, {
           workflow,
           artifacts,
           pdf,
           setLoading,
-        }),
-      onHandleBlockFinder: () =>
-        handleBlockFinder(bfFile, bfFindTables, bfFindFigures, { workflow, artifacts, pdf, setLoading }),
-      onHandleBlockExtractor: () =>
-        handleBlockExtractor(processor, layoutModel, tableModel, beUseExistingJson, { workflow, artifacts, pdf, setLoading }),
+        }, sourceJson),
+      onHandleBlockFinder: (sourceJson) =>
+        handleBlockFinder(bfFile, bfFindTables, bfFindFigures, { workflow, artifacts, pdf, setLoading }, sourceJson),
+      onHandleBlockExtractor: (sourceJson) =>
+        handleBlockExtractor(processor, layoutModel, tableModel, beUseExistingJson, { workflow, artifacts, pdf, setLoading }, sourceJson),
     };
 
     void continueBatchWorkflow(queueToResume, batchDeps, () => {}, setPendingBatchResumeQueue);
@@ -202,6 +205,8 @@ const App: React.FC = () => {
               hasTextFinderArtifact={!!artifacts.textFinderArtifact}
               hasBlockFinderArtifact={!!artifacts.blockFinderArtifact}
               hasBlockExtractorArtifact={!!artifacts.blockExtractorArtifact}
+              activePdfArtifact={artifacts.activePdfArtifact}
+              onShowArtifact={artifacts.setActivePdfArtifact}
             />
 
             <div className="grid gap-6" style={{ gridTemplateColumns: '360px minmax(0, 1fr)' }}>
@@ -357,13 +362,14 @@ const App: React.FC = () => {
                 {...pdf}
                 hasJsonArtifact={!!artifacts.docData}
                 editSessionEnabled={workflow.actionInProgress === 'edit_json'}
+                activePdfArtifactLabel={artifacts.activePdfArtifact}
                 onPageJumpChange={pdf.setPageJumpValue}
                 onPageJumpSubmit={() => pdf.navigateToPage(parseInt(pdf.pageJumpValue))}
                 onPrevPage={() => pdf.navigateToPage(pdf.currentPage - 1)}
                 onNextPage={() => pdf.navigateToPage(pdf.currentPage + 1)}
               >
                 <BoundingBoxes 
-                  blocks={artifacts.parsedData?.blocks || []}
+                  blocks={visualizedBlocks}
                   currentPage={pdf.currentPage}
                   pageDimensions={pdf.pageSizes[pdf.currentPage] || { width: 0, height: 0, scale: 1 }}
                   editSessionEnabled={workflow.actionInProgress === 'edit_json'}

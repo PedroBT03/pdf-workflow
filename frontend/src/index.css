@@ -33,3 +33,11 @@ body {
 .workflow-scroll::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(180deg, #52525b 0%, #3f3f46 100%);
 }
+
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.threshold-number-input {
+  color-scheme: dark;
+}

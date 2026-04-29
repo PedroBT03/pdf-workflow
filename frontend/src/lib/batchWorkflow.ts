@@ -14,10 +14,10 @@ export interface BatchWorkflowDependencies {
   onSetBeUseExistingJson: (b: boolean) => void;
   onSetSelectedAction: (a: WorkflowActionId) => void;
   onHandleExtract: () => Promise<boolean>;
-  onHandleUpgrade: () => Promise<boolean>;
-  onHandleTextFinder: () => Promise<boolean>;
-  onHandleBlockFinder: () => Promise<boolean>;
-  onHandleBlockExtractor: () => Promise<boolean>;
+  onHandleUpgrade: (sourceJson?: any) => Promise<boolean>;
+  onHandleTextFinder: (sourceJson?: any) => Promise<boolean>;
+  onHandleBlockFinder: (sourceJson?: any) => Promise<boolean>;
+  onHandleBlockExtractor: (sourceJson?: any) => Promise<boolean>;
 }
 
 export const continueBatchWorkflow = async (
@@ -27,7 +27,7 @@ export const continueBatchWorkflow = async (
   onPendingBatchQueueUpdate: (queue: any[] | null) => void
 ): Promise<void> => {
   let queue = queueOverride ?? deps.workflow.workflowQueue;
-  let extractedInThisBatchRun = false;
+  let extractedJsonSnapshot: any = null;
 
   while (queue.length > 0) {
     const [nextItem, ...rest] = queue;
@@ -57,10 +57,10 @@ export const continueBatchWorkflow = async (
 
     let ok = false;
     if (nextAction === 'extract_json_from_pdf') ok = await deps.onHandleExtract();
-    else if (nextAction === 'upgrade_json') ok = await deps.onHandleUpgrade();
-    else if (nextAction === 'text_finder') ok = await deps.onHandleTextFinder();
-    else if (nextAction === 'block_finder') ok = await deps.onHandleBlockFinder();
-    else if (nextAction === 'block_extractor') ok = await deps.onHandleBlockExtractor();
+    else if (nextAction === 'upgrade_json') ok = await deps.onHandleUpgrade(extractedJsonSnapshot);
+    else if (nextAction === 'text_finder') ok = await deps.onHandleTextFinder(extractedJsonSnapshot);
+    else if (nextAction === 'block_finder') ok = await deps.onHandleBlockFinder(extractedJsonSnapshot);
+    else if (nextAction === 'block_extractor') ok = await deps.onHandleBlockExtractor(extractedJsonSnapshot);
 
     if (!ok) {
       deps.workflow.setIsBatchRunning(false);
@@ -70,7 +70,7 @@ export const continueBatchWorkflow = async (
     }
 
     if (nextAction === 'extract_json_from_pdf') {
-      extractedInThisBatchRun = true;
+      extractedJsonSnapshot = deps.artifacts.getExtractedJsonArtifact?.() ?? deps.artifacts.docData ?? null;
     }
 
     queue = rest;

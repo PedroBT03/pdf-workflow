@@ -30,12 +30,22 @@ def prepare_blocks_for_upgrade(blocks: list[Any]) -> list[dict[str, Any]]:
 
         block = dict(raw)
         block["type"] = str(raw.get("type") or "paragraph")
-        block["content"] = str(raw.get("content") or "")
         block["page"] = safe_int(raw.get("page", 1), 1)
         block["box"] = normalized_box
 
-        if "caption" in block:
-            block["caption"] = str(block.get("caption") or "")
+        # Ensure required fields exist based on block type
+        block_type = block["type"]
+        if block_type in ["paragraph", "section_header"]:
+            block["content"] = str(raw.get("content") or "")
+        elif block_type == "Table":
+            block["caption"] = str(raw.get("caption") or "")
+            # Ensure 'block' field exists (nested table rows/cells)
+            if "block" not in block:
+                block["block"] = raw.get("block", [])
+        elif block_type == "Figure":
+            block["caption"] = str(raw.get("caption") or "")
+        else:
+            block["content"] = str(raw.get("content") or "")
 
         prepared.append(block)
 

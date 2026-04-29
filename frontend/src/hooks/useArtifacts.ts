@@ -1,10 +1,20 @@
 import { useState, useMemo, useRef, useCallback } from 'react';
 import { SelectedTarget, FeedbackMessage } from '../types';
 
+export type PdfArtifactViewKey =
+  | 'clean'
+  | 'docData'
+  | 'editedJson'
+  | 'upgradedJson'
+  | 'textFinderArtifact'
+  | 'blockFinderArtifact'
+  | 'blockExtractorArtifact';
+
 export const useArtifacts = () => {
   // Main document data and drafts
   const [docData, setDocData] = useState<any>(null);
   const [jsonDraft, setJsonDraft] = useState('');
+  const extractedJsonRef = useRef<any | null>(null);
   const workflowJsonRef = useRef<any | null>(null);
 
   // Results from specific actions
@@ -17,6 +27,9 @@ export const useArtifacts = () => {
   const [blockFinderArtifact, setBlockFinderArtifact] = useState<any | null>(null);
   const [blockFinderFoundArtifact, setBlockFinderFoundArtifact] = useState<any | null>(null);
   const [blockExtractorArtifact, setBlockExtractorArtifact] = useState<any | null>(null);
+
+  // Active PDF visualization artifact
+  const [activePdfArtifact, setActivePdfArtifact] = useState<PdfArtifactViewKey>('clean');
 
   // Editor selection
   const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(null);
@@ -48,9 +61,38 @@ export const useArtifacts = () => {
     return docData;
   }, [parsedData, editedJson, docData]);
 
+  const getExtractedJsonArtifact = useCallback(() => {
+    if (extractedJsonRef.current) return extractedJsonRef.current;
+    return docData;
+  }, [docData]);
+
+  const getArtifactByKey = useCallback((key: PdfArtifactViewKey) => {
+    switch (key) {
+      case 'clean':
+        return null;
+      case 'docData': return docData;
+      case 'editedJson': return editedJson;
+      case 'upgradedJson': return upgradedJson;
+      case 'textFinderArtifact': return textFinderArtifact;
+      case 'blockFinderArtifact': return blockFinderArtifact;
+      case 'blockExtractorArtifact': return blockExtractorArtifact;
+      default:
+        return getWorkflowJsonArtifact();
+    }
+  }, [docData, editedJson, upgradedJson, textFinderArtifact, blockFinderArtifact, blockExtractorArtifact, getWorkflowJsonArtifact]);
+
+  const getActivePdfArtifact = useCallback(() => getArtifactByKey(activePdfArtifact), [activePdfArtifact, getArtifactByKey]);
+
+  const setActivePdfArtifactAndResetSelection = useCallback((key: PdfArtifactViewKey) => {
+    setActivePdfArtifact(key);
+    setSelectedTarget(null);
+    setSelectedContent('');
+  }, []);
+
   const resetArtifacts = useCallback(() => {
     setDocData(null);
     setJsonDraft('');
+    extractedJsonRef.current = null;
     workflowJsonRef.current = null;
     setEditedJson(null);
     setHasEditedJson(false);
@@ -58,6 +100,7 @@ export const useArtifacts = () => {
     setTextFinderArtifact(null);
     setBlockFinderArtifact(null);
     setBlockExtractorArtifact(null);
+    setActivePdfArtifact('clean');
     setSelectedTarget(null);
     setSelectedContent('');
   }, []);
@@ -65,6 +108,7 @@ export const useArtifacts = () => {
   return {
     docData, setDocData,
     jsonDraft, setJsonDraft,
+    extractedJsonRef,
     workflowJsonRef,
     editedJson, setEditedJson,
     hasEditedJson, setHasEditedJson,
@@ -74,6 +118,8 @@ export const useArtifacts = () => {
     blockFinderArtifact, setBlockFinderArtifact,
     blockFinderFoundArtifact, setBlockFinderFoundArtifact,
     blockExtractorArtifact, setBlockExtractorArtifact,
+    activePdfArtifact, setActivePdfArtifact: setActivePdfArtifactAndResetSelection,
+    getActivePdfArtifact,
     selectedTarget, setSelectedTarget,
     selectedContent, setSelectedContent,
     outputFolderHandle, setOutputFolderHandle,
@@ -81,6 +127,7 @@ export const useArtifacts = () => {
     editorFeedback, setEditorFeedback,
     exportFeedback, setExportFeedback,
     parsedData,
+    getExtractedJsonArtifact,
     getWorkflowJsonArtifact,
     resetArtifacts
   };

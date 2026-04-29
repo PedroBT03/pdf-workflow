@@ -1,5 +1,6 @@
 import React from 'react';
-import { Braces } from 'lucide-react';
+import { Braces, Eye } from 'lucide-react';
+import { PdfArtifactViewKey } from '../../hooks/useArtifacts';
 
 interface ArtifactsBarProps {
   hasPdfArtifact: boolean;
@@ -9,6 +10,8 @@ interface ArtifactsBarProps {
   hasTextFinderArtifact: boolean;
   hasBlockFinderArtifact: boolean;
   hasBlockExtractorArtifact: boolean;
+  activePdfArtifact: PdfArtifactViewKey;
+  onShowArtifact: (key: PdfArtifactViewKey) => void;
 }
 
 /**
@@ -29,6 +32,29 @@ const StatusBadge: React.FC<{ label: string; isAvailable: boolean }> = ({ label,
   </div>
 );
 
+const ArtifactViewButton: React.FC<{
+  label: string;
+  isAvailable: boolean;
+  isActive: boolean;
+  onClick: () => void;
+}> = ({ label, isAvailable, isActive, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={!isAvailable}
+    className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors ${
+      isActive
+        ? 'bg-blue-600/25 text-blue-200 border-blue-500/50'
+        : isAvailable
+          ? 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
+          : 'bg-zinc-900 text-zinc-600 border-zinc-800 opacity-50 cursor-not-allowed'
+    }`}
+  >
+    <Eye className="w-3.5 h-3.5" />
+    <span>{isActive ? 'Showing' : 'Show'} {label}</span>
+  </button>
+);
+
 export const ArtifactsBar: React.FC<ArtifactsBarProps> = ({
   hasPdfArtifact,
   hasJsonArtifact,
@@ -37,6 +63,8 @@ export const ArtifactsBar: React.FC<ArtifactsBarProps> = ({
   hasTextFinderArtifact,
   hasBlockFinderArtifact,
   hasBlockExtractorArtifact,
+  activePdfArtifact,
+  onShowArtifact,
 }) => {
   return (
     <div className="w-full mb-3">
@@ -58,6 +86,52 @@ export const ArtifactsBar: React.FC<ArtifactsBarProps> = ({
           <StatusBadge label="Text Finder" isAvailable={hasTextFinderArtifact} />
           <StatusBadge label="Block Finder" isAvailable={hasBlockFinderArtifact} />
           <StatusBadge label="Block Extractor" isAvailable={hasBlockExtractorArtifact} />
+        </div>
+
+        <div className="w-full flex flex-wrap items-center gap-2 pt-1 border-t border-zinc-800/80 mt-1">
+          <span className="text-[10px] uppercase tracking-[0.25em] text-zinc-500 font-bold mr-1">Show on PDF</span>
+          <ArtifactViewButton
+            label="Clean PDF"
+            isAvailable={hasPdfArtifact}
+            isActive={activePdfArtifact === 'clean'}
+            onClick={() => onShowArtifact('clean')}
+          />
+          <ArtifactViewButton
+            label="JSON"
+            isAvailable={hasJsonArtifact}
+            isActive={activePdfArtifact === 'docData'}
+            onClick={() => onShowArtifact('docData')}
+          />
+          <ArtifactViewButton
+            label="Edited"
+            isAvailable={hasEditedJson}
+            isActive={activePdfArtifact === 'editedJson'}
+            onClick={() => onShowArtifact('editedJson')}
+          />
+          <ArtifactViewButton
+            label="Upgraded"
+            isAvailable={hasUpgradedArtifact}
+            isActive={activePdfArtifact === 'upgradedJson'}
+            onClick={() => onShowArtifact('upgradedJson')}
+          />
+          <ArtifactViewButton
+            label="Text Finder"
+            isAvailable={hasTextFinderArtifact}
+            isActive={activePdfArtifact === 'textFinderArtifact'}
+            onClick={() => onShowArtifact('textFinderArtifact')}
+          />
+          <ArtifactViewButton
+            label="Block Finder"
+            isAvailable={hasBlockFinderArtifact}
+            isActive={activePdfArtifact === 'blockFinderArtifact'}
+            onClick={() => onShowArtifact('blockFinderArtifact')}
+          />
+          <ArtifactViewButton
+            label="Block Extractor"
+            isAvailable={hasBlockExtractorArtifact}
+            isActive={activePdfArtifact === 'blockExtractorArtifact'}
+            onClick={() => onShowArtifact('blockExtractorArtifact')}
+          />
         </div>
       </div>
     </div>

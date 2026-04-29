@@ -16,3 +16,4 @@ ftfy
 dill
 omegaconf
 docling
+pycocotools

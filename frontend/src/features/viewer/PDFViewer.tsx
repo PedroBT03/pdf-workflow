@@ -20,6 +20,7 @@ interface PDFViewerProps {
   // Layer data
   hasJsonArtifact: boolean;
   editSessionEnabled: boolean;
+  activePdfArtifactLabel?: string;
   children: React.ReactNode;
 }
 
@@ -39,6 +40,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({
   pageRefreshTick,
   hasJsonArtifact,
   editSessionEnabled,
+  activePdfArtifactLabel,
   children
 }) => {
   if (!pdfFile) {
@@ -56,7 +58,13 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({
         <div>
           <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 font-semibold">PDF preview</div>
           <div className="text-xs text-zinc-400 mt-1">
-            {hasJsonArtifact ? (editSessionEnabled ? 'Editing enabled' : 'Visualization active') : 'Waiting for extracted JSON'}
+            {hasJsonArtifact ? (
+              editSessionEnabled
+                ? 'Editing enabled'
+                : activePdfArtifactLabel === 'clean'
+                  ? 'Clean PDF view'
+                  : `Visualization active${activePdfArtifactLabel ? ` · ${activePdfArtifactLabel.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}` : ''}`
+            ) : 'Waiting for extracted JSON'}
           </div>
         </div>
         <div className="text-xs text-zinc-500">Page {currentPage} / {numPages || 1}</div>

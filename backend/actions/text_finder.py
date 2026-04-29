@@ -54,10 +54,7 @@ def extract_with_text_finder_cli(
     if run_cmd is None:
         run_cmd = subprocess.run
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "pdf2data.cli.text_finder",
+    cli_args = [
         input_tmp,
         output_tmp,
         keywords_file,
@@ -70,10 +67,46 @@ def extract_with_text_finder_cli(
         "--count_duplicates",
         "true" if count_duplicates else "false",
     ]
+    
+    child_env = os.environ.copy()
+    temp_home = None
+    
+    # For frozen PyInstaller builds, provide temporary config directory for pdf2doi
+    if getattr(sys, "frozen", False):
+        temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+        pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+        os.makedirs(pdf2doi_config_dir, exist_ok=True)
+        child_env["HOME"] = temp_home
+        child_env["USERPROFILE"] = temp_home
+        child_env["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
 
-    result = run_cmd(cmd, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError("Text Finder execution failed via pdf2data CLI.")
+    try:
+        if getattr(sys, "frozen", False):
+            from pdf2data.keywords import TextFinder
+
+            finder = TextFinder(keywords_file_path=keywords_file)
+            text_path = Path(input_tmp) / "document" / "document_content.json"
+            results = finder.find(
+                str(text_path),
+                int(word_count_threshold),
+                paragraph=find_paragraphs,
+                section_header=find_section_headers,
+                count_duplicates=count_duplicates,
+            )
+            return results.get("text", []) if isinstance(results, dict) else []
+
+        cmd = [sys.executable, "-m", "pdf2data.cli.text_finder", *cli_args]
+        result = run_cmd(cmd, check=False, capture_output=True, text=True, env=child_env)
+        if result.returncode != 0:
+            raise RuntimeError("Text Finder execution failed via pdf2data CLI.")
+    finally:
+        if temp_home and os.path.isdir(temp_home):
+            try:
+                import shutil
+
+                shutil.rmtree(temp_home)
+            except Exception:
+                pass
 
     results_path = Path(output_tmp) / "found_texts.txt"
     if not results_path.exists():

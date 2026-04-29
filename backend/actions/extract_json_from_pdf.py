@@ -1,4 +1,4 @@
-import importlib.util
+import importlib
 import json
 import os
 import shutil
@@ -69,7 +69,12 @@ FRIENDLY_PROCESSOR_ALIASES: dict[str, str] = {
 
 # Validate that required modules are installed; raise error with helpful message if missing.
 def require_modules(module_names: list[str], pipeline_name: str) -> None:
-    missing = [name for name in module_names if importlib.util.find_spec(name) is None]
+    missing: list[str] = []
+    for name in module_names:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            missing.append(name)
     if missing:
         raise RuntimeError(
             f"Missing dependency for {pipeline_name}: {', '.join(missing)}. Install requirements-ml.txt."
@@ -93,6 +98,230 @@ def require_torchvision_runtime() -> None:
             "Detected torch/torchvision binary mismatch (missing torchvision::nms). "
             "Reinstall torch, torchvision and torchaudio from the same source (CPU or same CUDA build)."
         ) from exc
+
+
+def _run_pdf2data_direct(
+    input_tmp: str,
+    output_tmp: str,
+    layout_models: list[str],
+    table_model: str | None,
+    layout_model_threshold: str,
+    table_model_threshold: str,
+) -> None:
+    """Execute pdf2data directly using the Python API to bypass CLI subprocess issues in frozen builds."""
+    import os
+    import tempfile
+    
+    # Set up temporary home for pdf2doi
+    temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+    pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+    os.makedirs(pdf2doi_config_dir, exist_ok=True)
+    
+    previous_home = os.environ.get("HOME")
+    previous_userprofile = os.environ.get("USERPROFILE")
+    previous_pdf2doi_config = os.environ.get("PDF2DOI_CONFIG_DIR")
+    
+    try:
+        os.environ["HOME"] = temp_home
+        os.environ["USERPROFILE"] = temp_home
+        os.environ["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
+        
+        from pdf2data.pdf2data_pipeline import PDF2Data
+        
+        for layout_model in layout_models:
+            pdf2data_pipeline = PDF2Data(
+                layout_model=layout_model,
+                layout_model_threshold=float(layout_model_threshold),
+                table_model=table_model,
+                table_model_threshold=float(table_model_threshold),
+                device="cpu",
+                input_folder=input_tmp,
+                output_folder=output_tmp,
+                extract_references=True,
+            )
+            pdf2data_pipeline.pdf_transform()
+            break  # Success on first model
+    finally:
+        if previous_home:
+            os.environ["HOME"] = previous_home
+        else:
+            os.environ.pop("HOME", None)
+        if previous_userprofile:
+            os.environ["USERPROFILE"] = previous_userprofile
+        else:
+            os.environ.pop("USERPROFILE", None)
+        if previous_pdf2doi_config:
+            os.environ["PDF2DOI_CONFIG_DIR"] = previous_pdf2doi_config
+        else:
+            os.environ.pop("PDF2DOI_CONFIG_DIR", None)
+        
+        if os.path.isdir(temp_home):
+            try:
+                shutil.rmtree(temp_home)
+            except Exception:
+                pass
+
+
+def _docling_item_to_block(item: dict, default_type: str) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+
+    prov = item.get("prov") or []
+    if not isinstance(prov, list) or not prov:
+        return None
+
+    first_prov = prov[0]
+    if not isinstance(first_prov, dict):
+        return None
+
+    bbox = first_prov.get("bbox")
+    if not isinstance(bbox, dict):
+        return None
+
+    try:
+        box = [
+            float(bbox.get("l", 0.0)),
+            float(bbox.get("t", 0.0)),
+            float(bbox.get("r", 0.0)),
+            float(bbox.get("b", 0.0)),
+        ]
+    except Exception:
+        return None
+
+    page_no = first_prov.get("page_no", 1)
+    content = (
+        item.get("text")
+        or item.get("orig")
+        or item.get("caption")
+        or item.get("content")
+        or item.get("name")
+        or item.get("label")
+        or default_type
+    )
+    block_type = str(item.get("label") or item.get("type") or default_type or "text")
+
+    return {
+        "page": safe_int(page_no, 1),
+        "box": box,
+        "originalBox": box,
+        "content": str(content or ""),
+        "type": normalize_layout_label(block_type),
+        "layout_type": block_type,
+        "font_size": 11.0,
+        "color": (0, 0, 0),
+        "source": "docling",
+    }
+
+
+def _run_docling_direct(input_tmp: str, output_tmp: str) -> list[dict]:
+    """Execute Docling directly using the Python API to avoid frozen subprocess issues."""
+    import tempfile
+    from pathlib import Path
+
+    # Find the PDF file in input_tmp directory
+    input_path = Path(input_tmp)
+    pdf_files = list(input_path.glob("*.pdf"))
+    
+    if not pdf_files:
+        raise RuntimeError(f"No PDF files found in input directory: {input_tmp}")
+    
+    pdf_file_path = str(pdf_files[0])  # Use first PDF found
+
+    temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+    pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+    os.makedirs(pdf2doi_config_dir, exist_ok=True)
+
+    previous_home = os.environ.get("HOME")
+    previous_userprofile = os.environ.get("USERPROFILE")
+    previous_pdf2doi_config = os.environ.get("PDF2DOI_CONFIG_DIR")
+    previous_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    previous_omp_num_threads = os.environ.get("OMP_NUM_THREADS")
+    previous_tf_enable_onednn = os.environ.get("TF_ENABLE_ONEDNN_OPTS")
+
+    try:
+        os.environ["HOME"] = temp_home
+        os.environ["USERPROFILE"] = temp_home
+        os.environ["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+        # Monkey patch importlib.metadata.version to handle missing metadata in PyInstaller executables
+        import importlib.metadata as metadata_module
+        _original_version = metadata_module.version
+        
+        def _patched_version(package_name):
+            try:
+                return _original_version(package_name)
+            except metadata_module.PackageNotFoundError:
+                # Return dummy version for packages with missing metadata (common in PyInstaller)
+                return "0.0.0"
+        
+        metadata_module.version = _patched_version
+
+        from docling.document_converter import DocumentConverter
+
+        converter = DocumentConverter()
+        result = converter.convert(pdf_file_path)
+        document = result.document
+        doc_data = document.export_to_dict()
+
+        raw_blocks: list[dict] = []
+        for section_name, default_type in (
+            ("texts", "text"),
+            ("tables", "table"),
+            ("pictures", "picture"),
+            ("key_value_items", "key_value"),
+            ("form_items", "form"),
+        ):
+            section_items = doc_data.get(section_name, []) if isinstance(doc_data, dict) else []
+            if not isinstance(section_items, list):
+                continue
+            for item in section_items:
+                block = _docling_item_to_block(item, default_type)
+                if block is not None:
+                    raw_blocks.append(block)
+
+        if not raw_blocks:
+            raise RuntimeError("Docling did not produce any extractable blocks.")
+
+        return normalize_raw_blocks(raw_blocks, source="docling")
+    finally:
+        if previous_home is not None:
+            os.environ["HOME"] = previous_home
+        else:
+            os.environ.pop("HOME", None)
+
+        if previous_userprofile is not None:
+            os.environ["USERPROFILE"] = previous_userprofile
+        else:
+            os.environ.pop("USERPROFILE", None)
+
+        if previous_pdf2doi_config is not None:
+            os.environ["PDF2DOI_CONFIG_DIR"] = previous_pdf2doi_config
+        else:
+            os.environ.pop("PDF2DOI_CONFIG_DIR", None)
+
+        if previous_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda_visible_devices
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+        if previous_omp_num_threads is not None:
+            os.environ["OMP_NUM_THREADS"] = previous_omp_num_threads
+        else:
+            os.environ.pop("OMP_NUM_THREADS", None)
+
+        if previous_tf_enable_onednn is not None:
+            os.environ["TF_ENABLE_ONEDNN_OPTS"] = previous_tf_enable_onednn
+        else:
+            os.environ.pop("TF_ENABLE_ONEDNN_OPTS", None)
+
+        if os.path.isdir(temp_home):
+            try:
+                shutil.rmtree(temp_home)
+            except Exception:
+                pass
 
 
 # Normalize extracted blocks with standardized types, boxes, content, and metadata.
@@ -253,65 +482,82 @@ def extract_with_pdf2data_cli(
     layout_model_threshold: str = "0.7",
     table_model_threshold: str = "0.5",
 ) -> list[dict]:
-    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
-
+    import tempfile
+    
     if layout_models is None:
         layout_models = ["PP-DocLayout-L", "DocLayout-YOLO-DocStructBench"]
     last_error: Exception | None = None
 
     for layout_model in layout_models:
-        cmd = [
-            *base_cmd,
-            "--pipeline",
-            "NotDefined",
-            "--layout_model",
-            layout_model,
-            "--layout_model_threshold",
-            layout_model_threshold,
-            "--table_model_threshold",
-            table_model_threshold,
-            "--device",
-            "cpu",
-        ]
-        if table_model:
-            cmd.extend(["--table_model", table_model])
-
-        child_env = os.environ.copy()
-        child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-        child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-        child_env.setdefault("OMP_NUM_THREADS", "1")
-        child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-
         try:
-            result = subprocess.run(
-                cmd,
-                check=False,
-                timeout=900,
-                env=child_env,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                stderr_text = result.stderr or ""
-                try:
-                    find_first_content_json(output_tmp)
-                    has_content = True
-                except Exception:
-                    has_content = False
+            if getattr(sys, "frozen", False):
+                # In frozen mode, use direct Python API instead of subprocess
+                _run_pdf2data_direct(
+                    input_tmp=input_tmp,
+                    output_tmp=output_tmp,
+                    layout_models=[layout_model],
+                    table_model=table_model,
+                    layout_model_threshold=layout_model_threshold,
+                    table_model_threshold=table_model_threshold,
+                )
+            else:
+                # In development, use subprocess with sys.executable (pointing to venv python)
+                cli_args = [
+                    input_tmp,
+                    output_tmp,
+                    "--pipeline",
+                    "NotDefined",
+                    "--layout_model",
+                    layout_model,
+                    "--layout_model_threshold",
+                    layout_model_threshold,
+                    "--table_model_threshold",
+                    table_model_threshold,
+                    "--device",
+                    "cpu",
+                ]
+                if table_model:
+                    cli_args.extend(["--table_model", table_model])
 
-                if not (has_content and "anystyle" in stderr_text.lower()):
-                    raise subprocess.CalledProcessError(
-                        returncode=result.returncode,
-                        cmd=cmd,
-                        output=result.stdout,
-                        stderr=result.stderr,
-                    )
+                child_env = os.environ.copy()
+                child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+                child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+                child_env.setdefault("OMP_NUM_THREADS", "1")
+                child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+                
+                cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", *cli_args]
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=900,
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    stderr_text = result.stderr or ""
+                    try:
+                        find_first_content_json(output_tmp)
+                        has_content = True
+                    except Exception:
+                        has_content = False
+
+                    if not (has_content and "anystyle" in stderr_text.lower()):
+                        raise subprocess.CalledProcessError(
+                            returncode=result.returncode,
+                            cmd=cmd,
+                            output=result.stdout,
+                            stderr=result.stderr,
+                        )
             last_error = None
             break
         except subprocess.TimeoutExpired as exc:
             last_error = exc
             continue
         except subprocess.CalledProcessError as exc:
+            last_error = exc
+            continue
+        except Exception as exc:
             last_error = exc
             continue
 
@@ -339,7 +585,7 @@ def extract_with_pdf2data_cli(
             ) from last_error
 
         raise RuntimeError(
-            "PDF2Data execution failed in isolated subprocess. Check backend logs for native runtime errors."
+            f"PDF2Data execution failed: {str(last_error)}"
         ) from last_error
 
     content_path = find_first_content_json(output_tmp)
@@ -359,54 +605,10 @@ def extract_with_docling_cli(
     output_tmp: str,
     find_first_content_json: Callable[[str], str],
 ) -> list[dict]:
-    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
-    cmd = [*base_cmd, "--pipeline", "Docling"]
-
-    child_env = os.environ.copy()
-    child_env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-    child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-    child_env.setdefault("OMP_NUM_THREADS", "1")
-    child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-
     try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            timeout=900,
-            env=child_env,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Docling timed out during conversion.") from exc
-
-    if result.returncode != 0:
-        stderr_text = result.stderr or ""
-        try:
-            find_first_content_json(output_tmp)
-            has_content = True
-        except Exception:
-            has_content = False
-
-        if has_content and "anystyle" in stderr_text.lower():
-            pass
-        elif "cudnn_status_not_initialized" in stderr_text.lower() or "cudnn" in stderr_text.lower():
-            raise RuntimeError(
-                "Docling failed due to CUDA/cuDNN runtime initialization. "
-                "This environment should run Docling in CPU mode only; try again or use processor='mineru'/'pdf2data'."
-            )
-        else:
-            raise RuntimeError("Docling execution failed in isolated subprocess.")
-
-    content_path = find_first_content_json(output_tmp)
-    with open(content_path, "r", encoding="utf-8") as f:
-        parsed = json.load(f)
-
-    raw_blocks = parsed.get("blocks", []) if isinstance(parsed, dict) else []
-    if not isinstance(raw_blocks, list):
-        raw_blocks = []
-
-    return normalize_raw_blocks(raw_blocks, source="docling")
+        return _run_docling_direct(input_tmp=input_tmp, output_tmp=output_tmp)
+    except Exception as exc:
+        raise RuntimeError("Docling execution failed in-process.") from exc
 
 
 # Execute MinerU via pdf2data CLI wrapper to extract content blocks from PDF.
@@ -416,12 +618,14 @@ def extract_with_mineru_pdf2data_cli(
     find_first_content_json: Callable[[str], str],
     run_cmd: Callable[..., Any] | None = None,
 ) -> list[dict]:
+    import tempfile
+    
     if run_cmd is None:
         run_cmd = subprocess.run
 
-    base_cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", input_tmp, output_tmp]
-    cmd = [
-        *base_cmd,
+    cli_args = [
+        input_tmp,
+        output_tmp,
         "--pipeline",
         "MinerU",
         "--extract_tables",
@@ -437,8 +641,19 @@ def extract_with_mineru_pdf2data_cli(
     child_env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     child_env.setdefault("OMP_NUM_THREADS", "1")
     child_env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    
+    # For frozen PyInstaller builds, provide temporary config directory for pdf2doi
+    temp_home = None
+    if getattr(sys, "frozen", False):
+        temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+        pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+        os.makedirs(pdf2doi_config_dir, exist_ok=True)
+        child_env["HOME"] = temp_home
+        child_env["USERPROFILE"] = temp_home
+        child_env["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
 
     try:
+        cmd = [sys.executable, "-m", "pdf2data.cli.pdf2data", *cli_args]
         result = run_cmd(
             cmd,
             check=False,
@@ -449,6 +664,12 @@ def extract_with_mineru_pdf2data_cli(
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("MinerU timed out during conversion.") from exc
+    finally:
+        if temp_home and os.path.isdir(temp_home):
+            try:
+                shutil.rmtree(temp_home)
+            except Exception:
+                pass
 
     if result.returncode != 0:
         stderr_text = result.stderr or ""

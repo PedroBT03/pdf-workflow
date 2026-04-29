@@ -49,6 +49,13 @@ pnpm-debug.log*
 # Build artifacts
 build/
 dist/
+backend/build/
+backend/dist/
+backend/*.spec
+
+# Build outputs (root level)
+/pdf-workflow
+/_internal
 
 # Runtime/temp files
 *.pid
@@ -59,5 +66,7 @@ dist/
 backend/uploads/
 backend/results/
 
+# Specific files
 pdf-workflow.txt
 test_content.json
+test_pdf_keywords/

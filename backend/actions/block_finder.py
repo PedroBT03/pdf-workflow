@@ -1,5 +1,6 @@
 import json
 import re
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,10 +46,7 @@ def extract_with_block_finder_cli(
     if run_cmd is None:
         run_cmd = subprocess.run
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "pdf2data.cli.block_finder",
+    cli_args = [
         input_tmp,
         output_tmp,
         keywords_file,
@@ -57,10 +55,41 @@ def extract_with_block_finder_cli(
         "--find_figures",
         "true" if find_figures else "false",
     ]
+    
+    child_env = os.environ.copy()
+    temp_home = None
+    
+    # For frozen PyInstaller builds, provide temporary config directory for pdf2doi
+    if getattr(sys, "frozen", False):
+        temp_home = tempfile.mkdtemp(prefix="pdfwf_home_")
+        pdf2doi_config_dir = os.path.join(temp_home, "pdf2doi")
+        os.makedirs(pdf2doi_config_dir, exist_ok=True)
+        child_env["HOME"] = temp_home
+        child_env["USERPROFILE"] = temp_home
+        child_env["PDF2DOI_CONFIG_DIR"] = pdf2doi_config_dir
 
-    result = run_cmd(cmd, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError("Block Finder execution failed via pdf2data CLI.")
+    try:
+        if getattr(sys, "frozen", False):
+            from pdf2data.keywords import BlockFinder
+
+            finder = BlockFinder(keywords_file_path=keywords_file)
+            blocks_path = Path(input_tmp) / "document" / "document_content.json"
+            results = finder.find(str(blocks_path), tables=find_tables, figures=find_figures)
+            matched = results.get("blocks", []) if isinstance(results, dict) else []
+            return [block for block in matched if isinstance(block, dict)]
+
+        cmd = [sys.executable, "-m", "pdf2data.cli.block_finder", *cli_args]
+        result = run_cmd(cmd, check=False, capture_output=True, text=True, env=child_env)
+        if result.returncode != 0:
+            raise RuntimeError("Block Finder execution failed via pdf2data CLI.")
+    finally:
+        if temp_home and os.path.isdir(temp_home):
+            try:
+                import shutil
+
+                shutil.rmtree(temp_home)
+            except Exception:
+                pass
 
     results_path = Path(output_tmp) / "found_blocks.json"
     if not results_path.exists():
